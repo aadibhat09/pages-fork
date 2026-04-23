@@ -1,763 +1,911 @@
 /**
- * Dashboard Preferences Module — SRP + Class-based architecture.
- * 
- * This module manages all user preferences for the dashboard including:
- * - Theme colors, fonts, and display settings
- * - Text-to-speech configuration
- * - Language/translation preferences
- * - Preset and custom themes
- * - Backend API synchronization
- * 
+ * Global site-wide theme preferences — SRP + Class-based architecture.
+ *
  * Classes use standard get/set naming where applicable:
- *   PreferencesConfig    – Shared constants & defaults
- *   FormatConverter      – frontend ↔ backend format conversion (toBackend / toFrontend)
- *   PreferencesAPI       – Backend fetch: get(), set(), delete(), checkLogin()
- *   PreferencesStore     – Cache layer: get(), set(), getThemes(), setThemes(), apply()
- *   FormManager          – HTML form: get() reads inputs, set() populates inputs
- *   ThemeRenderer        – Preset/custom buttons: setPresets(), setCustom(), set(name)
- *   TTSPanel             – Voice list: set() populates, test() speaks sample
- *   TranslationHelper    – Cookie cleanup & clean reload
- *   StatusDisplay        – Flash messages: set(msg)
- *   SectionSaver         – Section-level save: set(section)
- *   PreferencesController – Orchestrator: wires everything, handles events
+ *   ColorUtils        – Pure color math (hex→rgb, luminance, adjust)
+ *   CSSInjector       – Builds and injects the override <style> block
+ *   ThemeEngine        – Reads prefs → sets CSS custom properties + injects overrides
+ *   LanguageManager    – Google Translate integration
+ *   TTSManager         – TTS wrapper: get() settings, speak(), stop()
+ *   PreferencesStore   – localStorage: get() reads stored prefs
+ *   SitePreferences    – Orchestrator: wires everything together, exposes public API
  */
+(function () {
 
-// ============================================
-// CONFIGURATION: Shared constants
-// ============================================
-export class PreferencesConfig {
-    static SITE_DEFAULT = {
-        bg: '#121212',
-        text: '#F0F0F0',
-        font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
-        size: 14,
-        accent: '#4CAFEF'
-    };
+  // ============================================
+  // CONFIGURATION: Shared constants
+  // ============================================
+  const LANGUAGES = {
+    '': { name: 'Default (No Translation)', code: '' },
+    'es': { name: 'Spanish', code: 'es' },
+    'fr': { name: 'French', code: 'fr' },
+    'de': { name: 'German', code: 'de' },
+    'it': { name: 'Italian', code: 'it' },
+    'pt': { name: 'Portuguese', code: 'pt' },
+    'ru': { name: 'Russian', code: 'ru' },
+    'zh-CN': { name: 'Chinese (Simplified)', code: 'zh-CN' },
+    'zh-TW': { name: 'Chinese (Traditional)', code: 'zh-TW' },
+    'ja': { name: 'Japanese', code: 'ja' },
+    'ko': { name: 'Korean', code: 'ko' },
+    'ar': { name: 'Arabic', code: 'ar' },
+    'hi': { name: 'Hindi', code: 'hi' },
+    'vi': { name: 'Vietnamese', code: 'vi' },
+    'th': { name: 'Thai', code: 'th' },
+    'nl': { name: 'Dutch', code: 'nl' },
+    'pl': { name: 'Polish', code: 'pl' },
+    'tr': { name: 'Turkish', code: 'tr' },
+    'uk': { name: 'Ukrainian', code: 'uk' },
+    'he': { name: 'Hebrew', code: 'he' },
+    'fa': { name: 'Persian (Farsi)', code: 'fa' },
+  };
 
-    static PRESETS = window.SitePreferences?.PRESETS || {
-        'Site Default': PreferencesConfig.SITE_DEFAULT,
-        'Midnight': { bg: '#0b1220', text: '#e6eef8', font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial", size: 14, accent: '#3b82f6' },
-        'Light': { bg: '#ffffff', text: '#0f172a', font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial", size: 14, accent: '#2563eb' },
-        'Green': { bg: '#154734', text: '#e6f6ef', font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial", size: 14, accent: '#10b981' },
-        'Sepia': { bg: '#f4ecd8', text: '#3b2f2f', font: "Georgia, 'Times New Roman', Times, serif", size: 14, accent: '#b45309' },
-        'Cyberpunk': { bg: '#0a0a0f', text: '#f0f0f0', font: "'Source Code Pro', monospace", size: 14, accent: '#f72585' },
-        'Ocean': { bg: '#0c1929', text: '#e0f2fe', font: "'Open Sans', Arial, sans-serif", size: 15, accent: '#06b6d4' }
-    };
+  const SITE_DEFAULT = {
+    bg: '#121212',
+    text: '#F0F0F0',
+    font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
+    size: 14,
+    accent: '#4CAFEF',
+  };
 
-    static MAX_CUSTOM = 10;
-    static LOCAL_STORAGE_KEY = 'sitePreferences';
-    static LOCAL_THEMES_KEY = 'siteThemes';
-}
+  const PRESETS = {
+    'Site Default': SITE_DEFAULT,
+    Midnight: {
+      bg: '#0b1220', text: '#e6eef8',
+      font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
+      size: 14, accent: '#3b82f6',
+    },
+    Light: {
+      bg: '#ffffff', text: '#FF80AA',
+      font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
+      size: 14, accent: '#2563eb',
+    },
+    Green: {
+      bg: '#154734', text: '#e6f6ef',
+      font: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial",
+      size: 14, accent: '#10b981',
+    },
+    Sepia: {
+      bg: '#f4ecd8', text: '#A52A2A',
+      font: "Georgia, 'Times New Roman', Times, serif",
+      size: 14, accent: '#b45309',
+    },
+    Cyberpunk: {
+      bg: '#0a0a0f', text: '#f0f0f0',
+      font: "'Source Code Pro', monospace",
+      size: 14, accent: '#f72585',
+    },
+    Ocean: {
+      bg: '#0c1929', text: '#e0f2fe',
+      font: "'Open Sans', Arial, sans-serif",
+      size: 15, accent: '#06b6d4',
+    },
+  };
 
-// ============================================
-// RESPONSIBILITY: Convert between frontend & backend formats
-// ============================================
-export class FormatConverter {
-    /** Frontend prefs → backend payload */
-    static toBackend(prefs) {
-        return {
-            backgroundColor: prefs.bg,
-            textColor: prefs.text,
-            fontFamily: prefs.font,
-            fontSize: prefs.size,
-            accentColor: prefs.accent,
-            selectionColor: prefs.selectionColor || '#3b82f6',
-            buttonStyle: prefs.buttonStyle || 'rounded',
-            language: prefs.language || '',
-            ttsVoice: prefs.ttsVoice || '',
-            ttsRate: prefs.ttsRate || 1.0,
-            ttsPitch: prefs.ttsPitch || 1.0,
-            ttsVolume: prefs.ttsVolume || 1.0,
-            customThemes: JSON.stringify(prefs.customThemes || {})
-        };
+  // ============================================
+  // RESPONSIBILITY: Pure color math utilities
+  // ============================================
+  class ColorUtils {
+    /** Convert hex string to { r, g, b } */
+    static hexToRgb(hex) {
+      if (!hex) return { r: 0, g: 0, b: 0 };
+      hex = hex.replace('#', '');
+      if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+      const bigint = parseInt(hex, 16);
+      return {
+        r: (bigint >> 16) & 255,
+        g: (bigint >> 8) & 255,
+        b: bigint & 255,
+      };
     }
 
-    /** Backend payload → frontend prefs (returns null when data is empty) */
-    static toFrontend(backendPrefs) {
-        if (!backendPrefs) return null;
-
-        const hasBg = backendPrefs.backgroundColor && backendPrefs.backgroundColor !== '';
-        const hasText = backendPrefs.textColor && backendPrefs.textColor !== '';
-        if (!hasBg && !hasText) return null;
-
-        let customThemes = {};
-        try { customThemes = backendPrefs.customThemes ? JSON.parse(backendPrefs.customThemes) : {}; }
-        catch (_) { customThemes = {}; }
-
-        const d = PreferencesConfig.SITE_DEFAULT;
-        return {
-            bg: backendPrefs.backgroundColor || d.bg,
-            text: backendPrefs.textColor || d.text,
-            font: backendPrefs.fontFamily || d.font,
-            size: backendPrefs.fontSize || d.size,
-            accent: backendPrefs.accentColor || d.accent,
-            selectionColor: backendPrefs.selectionColor || d.accent,
-            buttonStyle: backendPrefs.buttonStyle || 'rounded',
-            language: backendPrefs.language || '',
-            ttsVoice: backendPrefs.ttsVoice || '',
-            ttsRate: backendPrefs.ttsRate || 1.0,
-            ttsPitch: backendPrefs.ttsPitch || 1.0,
-            ttsVolume: backendPrefs.ttsVolume || 1.0,
-            customThemes
-        };
-    }
-}
-
-// ============================================
-// RESPONSIBILITY: All backend fetch() calls
-// ============================================
-export class PreferencesAPI {
-    static isLoggedIn = false;
-    static backendPrefsExist = false;
-    static javaURI = null;
-    static fetchOptions = null;
-
-    /** Initialize with API config */
-    static init(javaURI, fetchOptions) {
-        PreferencesAPI.javaURI = javaURI;
-        PreferencesAPI.fetchOptions = fetchOptions;
+    /** Perceived luminance 0-1 */
+    static getLuminance(hex) {
+      const { r, g, b } = ColorUtils.hexToRgb(hex);
+      return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     }
 
-    /** Check login by hitting the person endpoint */
-    static async checkLogin() {
-        try {
-            const res = await fetch(`${PreferencesAPI.javaURI}/api/person/get`, PreferencesAPI.fetchOptions);
-            PreferencesAPI.isLoggedIn = res.ok;
-            return res.ok;
-        } catch (_) {
-            console.log('Login check failed, assuming guest user');
-            PreferencesAPI.isLoggedIn = false;
-            return false;
+    /** True when background is perceptually light */
+    static isLightColor(hex) {
+      return ColorUtils.getLuminance(hex) > 0.5;
+    }
+
+    /** Shift every channel by amt (positive = lighten, negative = darken) */
+    static adjustColor(hex, amt) {
+      const { r, g, b } = ColorUtils.hexToRgb(hex);
+      const clamp = v => Math.max(0, Math.min(255, v));
+      return (
+        '#' +
+        [clamp(r + amt), clamp(g + amt), clamp(b + amt)]
+          .map(v => {
+            const h = v.toString(16);
+            return h.length === 1 ? '0' + h : h;
+          })
+          .join('')
+      );
+    }
+  }
+
+  // ============================================
+  // RESPONSIBILITY: Build & inject override CSS
+  // ============================================
+  class CSSInjector {
+    static STYLE_ID = 'user-theme-override-css';
+
+    /**
+     * Inject (or update) the <style> block that overrides Tailwind /
+     * theme classes when the user theme is active.
+     */
+    static inject(opts) {
+      const { bg, text, font, size, accent, panel, uiBorder, textMuted,
+              selectionColor, buttonStyle } = opts;
+
+      let style = document.getElementById(CSSInjector.STYLE_ID);
+      if (!style) {
+        style = document.createElement('style');
+        style.id = CSSInjector.STYLE_ID;
+        document.head.appendChild(style);
+      }
+
+      let btnRadius = '0.375rem';
+      if (buttonStyle === 'square') btnRadius = '0';
+      else if (buttonStyle === 'pill') btnRadius = '9999px';
+
+      style.textContent = `
+        html.user-theme-active,
+        html.user-theme-active body {
+          background-color: ${bg} !important;
+          color: ${text} !important;
+          font-family: ${font} !important;
+          font-size: ${size}px !important;
         }
-    }
-
-    /** Fetch preferences from backend (returns frontend-format or null) */
-    static async get() {
-        try {
-            const res = await fetch(`${PreferencesAPI.javaURI}/api/user/preferences`, PreferencesAPI.fetchOptions);
-
-            if (res.status === 401) {
-                PreferencesAPI.isLoggedIn = false;
-                return null;
-            }
-            if (res.ok) {
-                PreferencesAPI.isLoggedIn = true;
-                const data = await res.json();
-                if (data && data.id) {
-                    PreferencesAPI.backendPrefsExist = true;
-                    return FormatConverter.toFrontend(data);
-                }
-                PreferencesAPI.backendPrefsExist = false;
-                return null;
-            }
-            return null;
-        } catch (e) {
-            console.error('fetchPreferences error', e);
-            PreferencesAPI.isLoggedIn = false;
-            return null;
+        html.user-theme-active ::selection {
+          background-color: ${selectionColor} !important;
+          color: white !important;
         }
-    }
-
-    /** Save (POST or PUT) preferences to backend */
-    static async set(prefs) {
-        try {
-            const method = PreferencesAPI.backendPrefsExist ? 'PUT' : 'POST';
-            const res = await fetch(`${PreferencesAPI.javaURI}/api/user/preferences`, {
-                ...PreferencesAPI.fetchOptions,
-                method,
-                body: JSON.stringify(FormatConverter.toBackend(prefs))
-            });
-            if (res.ok) { PreferencesAPI.backendPrefsExist = true; return true; }
-            return false;
-        } catch (e) {
-            console.error('savePreferences error', e);
-            return false;
+        html.user-theme-active ::-moz-selection {
+          background-color: ${selectionColor} !important;
+          color: white !important;
         }
-    }
-
-    /** Delete preferences from backend */
-    static async delete() {
-        try {
-            const res = await fetch(`${PreferencesAPI.javaURI}/api/user/preferences`, {
-                ...PreferencesAPI.fetchOptions,
-                method: 'DELETE'
-            });
-            if (res.ok) { PreferencesAPI.backendPrefsExist = false; return true; }
-            return false;
-        } catch (e) {
-            console.error('deletePreferences error', e);
-            return false;
+        html.user-theme-active button,
+        html.user-theme-active .btn,
+        html.user-theme-active [class*="rounded"] button,
+        html.user-theme-active input[type="submit"],
+        html.user-theme-active input[type="button"] {
+          border-radius: ${btnRadius} !important;
         }
+        html.user-theme-active .bg-neutral-900,
+        html.user-theme-active .bg-neutral-800 {
+          background-color: ${bg} !important;
+        }
+        html.user-theme-active .fixed.left-0.bg-neutral-800,
+        html.user-theme-active div[class*="bg-neutral-800"].border {
+          background-color: ${panel} !important;
+        }
+        html.user-theme-active .rounded-lg.bg-neutral-800,
+        html.user-theme-active .p-4.rounded-lg.bg-neutral-800 {
+          background-color: ${panel} !important;
+        }
+        html.user-theme-active .text-neutral-100,
+        html.user-theme-active .text-neutral-50,
+        html.user-theme-active .text-white {
+          color: ${text} !important;
+        }
+        html.user-theme-active .text-neutral-400,
+        html.user-theme-active .text-neutral-500 {
+          color: ${textMuted} !important;
+        }
+        html.user-theme-active .text-gray-300,
+        html.user-theme-active .text-gray-400,
+        html.user-theme-active .text-gray-500,
+        html.user-theme-active .text-gray-600 {
+          color: ${textMuted} !important;
+        }
+        html.user-theme-active .post-meta,
+        html.user-theme-active .post-meta-description {
+          color: ${textMuted} !important;
+        }
+        html.user-theme-active .border-neutral-700,
+        html.user-theme-active .border-neutral-600 {
+          border-color: ${uiBorder} !important;
+        }
+        html.user-theme-active .text-blue-500,
+        html.user-theme-active .border-blue-500 {
+          color: ${accent} !important;
+          border-color: ${accent} !important;
+        }
+        html.user-theme-active .bg-neutral-700 {
+          background-color: ${panel} !important;
+        }
+        html.user-theme-active input,
+        html.user-theme-active select,
+        html.user-theme-active textarea {
+          background-color: ${panel} !important;
+          color: ${text} !important;
+          border-color: ${uiBorder} !important;
+        }
+        html.user-theme-active .lesson-player {
+          background-color: ${bg} !important;
+        }
+        html.user-theme-active .lesson-sidebar {
+          background-color: ${panel} !important;
+          border-color: ${uiBorder} !important;
+        }
+        html.user-theme-active .lesson-sidebar,
+        html.user-theme-active .sidebar-header,
+        html.user-theme-active .sprint-nav,
+        html.user-theme-active .sprint-section,
+        html.user-theme-active .lesson-item {
+          background-color: ${panel} !important;
+          color: ${text} !important;
+        }
+        html.user-theme-active .lesson-main,
+        html.user-theme-active .main-content,
+        html.user-theme-active .lesson-content,
+        html.user-theme-active .content-wrapper {
+          background-color: ${bg} !important;
+          color: ${text} !important;
+        }
+        html.user-theme-active .sidebar-header h2,
+        html.user-theme-active .sidebar-header p,
+        html.user-theme-active .sprint-toggle,
+        html.user-theme-active .lesson-title {
+          color: ${text} !important;
+        }
+        html.user-theme-active .progress-bar-sidebar {
+          background-color: ${uiBorder} !important;
+        }
+        html.user-theme-active .module-card,
+        html.user-theme-active [class*="bg-neutral"],
+        html.user-theme-active [class*="bg-gray"],
+        html.user-theme-active [class*="bg-slate"],
+        html.user-theme-active [class*="bg-zinc"] {
+          background-color: ${panel} !important;
+          color: ${text} !important;
+        }
+        html.user-theme-active h1,
+        html.user-theme-active h2,
+        html.user-theme-active h3,
+        html.user-theme-active h4,
+        html.user-theme-active h5,
+        html.user-theme-active h6,
+        html.user-theme-active p,
+        html.user-theme-active li,
+        html.user-theme-active span,
+        html.user-theme-active div {
+          color: ${text} !important;
+        }
+        html.user-theme-active button,
+        html.user-theme-active .btn,
+        html.user-theme-active a.btn {
+          color: inherit !important;
+        }
+      `;
     }
-}
 
-// ============================================
-// RESPONSIBILITY: localStorage + in-memory cache
-// ============================================
-export class PreferencesStore {
-    static cachedPrefs = null;
+    /** Remove the injected override <style> element */
+    static remove() {
+      const el = document.getElementById(CSSInjector.STYLE_ID);
+      if (el) el.remove();
+    }
+  }
 
-    /** Apply prefs via the global SitePreferences engine */
+  // ============================================
+  // RESPONSIBILITY: Map prefs → CSS custom props
+  // ============================================
+  class ThemeEngine {
+    /**
+     * Apply a preferences object to the document via CSS custom properties,
+     * priority-color tokens, and the override stylesheet.
+     */
     static apply(prefs) {
-        if (window.SitePreferences?.applyPreferences) {
-            window.SitePreferences.applyPreferences(prefs);
+      const base = SITE_DEFAULT;
+      const bg = prefs?.bg || base.bg;
+      const text = prefs?.text || base.text;
+      const font = prefs?.font || base.font;
+      const size = prefs?.size || base.size;
+      const accent = prefs?.accent || base.accent;
+      const selectionColor = prefs?.selectionColor || accent;
+      const buttonStyle = prefs?.buttonStyle || 'rounded';
+
+      const root = document.documentElement;
+      const set = (name, value) => root.style.setProperty(name, value);
+
+      // Core preference variables
+      set('--pref-bg-color', bg);
+      set('--pref-text-color', text);
+      set('--pref-font-family', font);
+      set('--pref-font-size', size + 'px');
+      set('--pref-accent-color', accent);
+      set('--pref-selection-color', selectionColor);
+
+      // Derived background shades
+      const lightBg = ColorUtils.isLightColor(bg);
+      const dir = lightBg ? -1 : 1;
+
+      set('--background', bg);
+      set('--bg-0', bg);
+      set('--bg-1', ColorUtils.adjustColor(bg, 8 * dir));
+      set('--bg-2', ColorUtils.adjustColor(bg, 16 * dir));
+      set('--bg-3', ColorUtils.adjustColor(bg, 24 * dir));
+      set('--text', text);
+      set('--text-strong', ColorUtils.adjustColor(text, lightBg ? -20 : 20));
+      set('--white1', text);
+      set('--theme', lightBg ? 'base' : 'dark');
+
+      // Panel / UI surface tokens
+      const panel = ColorUtils.adjustColor(bg, 25 * dir);
+      const panelMid = ColorUtils.adjustColor(bg, 35 * dir);
+      const uiBg = ColorUtils.adjustColor(bg, 20 * dir);
+      const uiBorder = ColorUtils.adjustColor(bg, 45 * dir);
+
+      set('--panel', panel);
+      set('--panel-mid', panelMid);
+      set('--ui-bg', uiBg);
+      set('--ui-border', uiBorder);
+
+      // Muted text
+      const textMuted = lightBg ? '#6b7280' : ColorUtils.adjustColor(text, -60);
+      set('--text-muted', textMuted);
+
+      // Priority / semantic colours
+      if (lightBg) {
+        set('--priority-p0', '#b91c1c');
+        set('--priority-p1', '#c2410c');
+        set('--priority-p2', '#a16207');
+        set('--priority-p3', '#15803d');
+      } else {
+        set('--priority-p0', '#dc2626');
+        set('--priority-p1', '#ea580c');
+        set('--priority-p2', '#eab308');
+        set('--priority-p3', '#22c55e');
+      }
+
+      // Activate the theme class
+      root.classList.add('user-theme-active');
+
+      // Inject Tailwind override stylesheet
+      CSSInjector.inject({
+        bg, text, font, size, accent, panel, uiBorder, textMuted,
+        selectionColor, buttonStyle,
+      });
+
+      // Apply language translation if set
+      const lang = prefs?.language || '';
+      LanguageManager.apply(lang);
+    }
+
+    /** Remove all user-theme CSS custom properties and the override sheet */
+    static reset() {
+      const root = document.documentElement;
+      root.classList.remove('user-theme-active');
+      CSSInjector.remove();
+
+      const props = [
+        '--pref-bg-color', '--pref-text-color', '--pref-font-family',
+        '--pref-font-size', '--pref-accent-color', '--pref-selection-color',
+        '--pref-cursor-style', '--background',
+        '--bg-0', '--bg-1', '--bg-2', '--bg-3',
+        '--text', '--text-strong', '--text-muted', '--white1',
+        '--panel', '--panel-mid', '--ui-bg', '--ui-border',
+      ];
+      props.forEach(name => root.style.removeProperty(name));
+    }
+  }
+
+  // ============================================
+  // RESPONSIBILITY: Google Translate integration
+  // ============================================
+  class LanguageManager {
+    /** Inject the CSS that hides the Google Translate toolbar */
+    static _injectHideCSS() {
+      if (document.getElementById('google-translate-hide-css')) return;
+      const style = document.createElement('style');
+      style.id = 'google-translate-hide-css';
+      style.textContent = `
+        .goog-te-banner-frame, .goog-te-balloon-frame { display: none !important; }
+        body { top: 0 !important; position: static !important; }
+        .skiptranslate { display: none !important; }
+        .goog-te-gadget { display: none !important; }
+        #google_translate_element { display: none !important; }
+      `;
+      document.head.appendChild(style);
+    }
+
+    /** Clear all googtrans cookie variations */
+    static clearCookies() {
+      const domain = window.location.hostname;
+      document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+      document.cookie = `googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=${domain}`;
+      document.cookie = `googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=.${domain}`;
+      document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=.localhost';
+    }
+
+    /** Attempt to revert Google Translate to the original page language */
+    static _removeTranslation() {
+      LanguageManager.clearCookies();
+
+      const select = document.querySelector('.goog-te-combo');
+      if (select) {
+        select.value = '';
+        select.dispatchEvent(new Event('change'));
+      }
+
+      try {
+        const frame = document.querySelector('.goog-te-banner-frame');
+        if (frame && frame.contentDocument) {
+          const restoreBtn = frame.contentDocument.querySelector('.goog-te-button button');
+          if (restoreBtn) restoreBtn.click();
         }
+      } catch (_) { /* cross-origin – ok */ }
+
+      const isTranslated =
+        document.documentElement.classList.contains('translated-ltr') ||
+        document.documentElement.classList.contains('translated-rtl') ||
+        document.querySelector('html.translated-ltr, html.translated-rtl');
+
+      if (isTranslated) window.location.reload();
     }
 
     /**
-     * Load preferences: reset-flag → backend → localStorage → null.
-     * Also applies them to the page and syncs localStorage.
+     * Apply a language translation (or remove if langCode is empty).
+     * @param {string} langCode – ISO language code, e.g. 'es', 'fr', ''
      */
-    static async get() {
-        try {
-            const wasReset = localStorage.getItem('preferencesReset');
-            if (wasReset === 'true') {
-                localStorage.removeItem('preferencesReset');
-                return null;
-            }
+    static apply(langCode) {
+      document.documentElement.setAttribute('data-translate-lang', langCode);
+      LanguageManager._injectHideCSS();
+      LanguageManager.clearCookies();
 
-            const loggedIn = await PreferencesAPI.checkLogin();
-            if (loggedIn) {
-                const backendPrefs = await PreferencesAPI.get();
-                if (backendPrefs) {
-                    PreferencesStore.cachedPrefs = backendPrefs;
-                    PreferencesStore.apply(backendPrefs);
-                    localStorage.setItem(PreferencesConfig.LOCAL_STORAGE_KEY, JSON.stringify(backendPrefs));
-                    return backendPrefs;
-                }
-            }
+      if (!langCode) {
+        LanguageManager._removeTranslation();
+        return;
+      }
 
-            const raw = localStorage.getItem(PreferencesConfig.LOCAL_STORAGE_KEY);
-            if (raw) {
-                const prefs = JSON.parse(raw);
-                PreferencesStore.cachedPrefs = prefs;
-                PreferencesStore.apply(prefs);
-                return prefs;
-            }
-            return null;
-        } catch (e) {
-            console.error('loadPreferences error', e);
-            return null;
-        }
-    }
+      // Set cookies for the desired language
+      const domain = window.location.hostname;
+      document.cookie = `googtrans=/en/${langCode}; path=/`;
+      document.cookie = `googtrans=/en/${langCode}; path=/; domain=${domain}`;
+      document.cookie = `googtrans=/en/${langCode}; path=/; domain=.${domain}`;
 
-    /** Save prefs to cache + localStorage + backend (if logged in) */
-    static async set(prefs) {
-        try {
-            PreferencesStore.cachedPrefs = prefs;
-            PreferencesStore.apply(prefs);
-            FormManager.set(prefs);
-
-            localStorage.removeItem('preferencesReset');
-            localStorage.setItem(PreferencesConfig.LOCAL_STORAGE_KEY, JSON.stringify(prefs));
-
-            if (PreferencesAPI.isLoggedIn) {
-                const ok = await PreferencesAPI.set(prefs);
-                if (!ok) StatusDisplay.set('Saved locally (backend unavailable)');
-            }
-        } catch (e) {
-            console.error('savePreferences error', e);
-            localStorage.setItem(PreferencesConfig.LOCAL_STORAGE_KEY, JSON.stringify(prefs));
-        }
-    }
-
-    /** Load custom themes from cache or localStorage */
-    static getThemes() {
-        if (PreferencesStore.cachedPrefs?.customThemes) {
-            return PreferencesStore.cachedPrefs.customThemes;
-        }
-        try {
-            const raw = localStorage.getItem(PreferencesConfig.LOCAL_THEMES_KEY);
-            return raw ? JSON.parse(raw) : {};
-        } catch (_) { return {}; }
-    }
-
-    /** Save custom themes (embedded in the preferences object) */
-    static async setThemes(themesObj) {
-        try {
-            const current = PreferencesStore.cachedPrefs
-                || await PreferencesStore.get()
-                || { ...PreferencesConfig.SITE_DEFAULT };
-            current.customThemes = themesObj;
-            await PreferencesStore.set(current);
-            localStorage.setItem(PreferencesConfig.LOCAL_THEMES_KEY, JSON.stringify(themesObj));
-        } catch (e) {
-            console.error('saveThemes error', e);
-            localStorage.setItem(PreferencesConfig.LOCAL_THEMES_KEY, JSON.stringify(themesObj));
-        }
-    }
-}
-
-// ============================================
-// RESPONSIBILITY: Read / populate the HTML form
-// ============================================
-export class FormManager {
-    /** Read every form input into a prefs object */
-    static get() {
-        return {
-            bg: document.getElementById('pref-bg-color').value,
-            text: document.getElementById('pref-text-color').value,
-            font: document.getElementById('pref-font-family').value,
-            size: Number(document.getElementById('pref-font-size').value),
-            accent: document.getElementById('pref-accent-color').value,
-            language: document.getElementById('pref-language').value,
-            ttsVoice: document.getElementById('pref-tts-voice').value,
-            ttsRate: Number(document.getElementById('pref-tts-rate').value),
-            ttsPitch: Number(document.getElementById('pref-tts-pitch').value),
-            ttsVolume: Number(document.getElementById('pref-tts-volume').value),
-            selectionColor: document.getElementById('pref-selection-color').value,
-            buttonStyle: document.getElementById('pref-button-style').value,
-            customThemes: PreferencesStore.getThemes()
+      // Initialise Google Translate element (once)
+      if (!window.googleTranslateElementInit) {
+        window.googleTranslateElementInit = function () {
+          new google.translate.TranslateElement({
+            pageLanguage: 'en',
+            includedLanguages: Object.keys(LANGUAGES).filter(k => k).join(','),
+            layout: google.translate.TranslateElement.InlineLayout.SIMPLE,
+            autoDisplay: false,
+          }, 'google_translate_element');
         };
+      }
+
+      if (!document.getElementById('google_translate_element')) {
+        const container = document.createElement('div');
+        container.id = 'google_translate_element';
+        container.style.cssText = 'position:fixed;top:-9999px;left:-9999px;visibility:hidden;';
+        document.body.appendChild(container);
+      }
+
+      if (!document.getElementById('google-translate-script')) {
+        const script = document.createElement('script');
+        script.id = 'google-translate-script';
+        script.src = '//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit';
+        script.async = true;
+        document.head.appendChild(script);
+      }
+
+      // Poll until the combo-box appears, then trigger the switch
+      const attemptTranslation = (attempts = 0) => {
+        if (attempts > 100) return;
+        const select = document.querySelector('.goog-te-combo');
+        if (select) {
+          select.value = langCode;
+          select.dispatchEvent(new Event('change'));
+        } else {
+          setTimeout(() => attemptTranslation(attempts + 1), 50);
+        }
+      };
+      attemptTranslation();
+    }
+  }
+
+  // ============================================
+  // RESPONSIBILITY: Text-to-Speech wrapper
+  // ============================================
+  class TTSManager {
+    /** Get TTS settings from stored preferences */
+    static get() {
+      const prefs = PreferencesStore.get() || {};
+      return {
+        voice: prefs.ttsVoice || '',
+        rate: parseFloat(prefs.ttsRate) || 1,
+        pitch: parseFloat(prefs.ttsPitch) || 1,
+        volume: parseFloat(prefs.ttsVolume) || 1,
+      };
     }
 
-    /** Push a prefs object into every form input */
-    static set(prefs) {
-        if (!prefs) return;
-        const d = PreferencesConfig.SITE_DEFAULT;
-        document.getElementById('pref-bg-color').value = prefs.bg || d.bg;
-        document.getElementById('pref-text-color').value = prefs.text || d.text;
-        document.getElementById('pref-font-family').value = prefs.font || d.font;
-        document.getElementById('pref-font-size').value = prefs.size || d.size;
-        document.getElementById('font-size-label').textContent = prefs.size || d.size;
-        document.getElementById('pref-accent-color').value = prefs.accent || d.accent;
-        document.getElementById('pref-language').value = prefs.language || '';
+    /** Speak the given text, optionally overriding saved settings */
+    static speak(text, options = {}) {
+      if (!('speechSynthesis' in window)) {
+        console.warn('Text-to-speech not supported in this browser');
+        return null;
+      }
+      speechSynthesis.cancel();
 
-        if (prefs.ttsVoice) document.getElementById('pref-tts-voice').value = prefs.ttsVoice;
-        document.getElementById('pref-tts-rate').value = prefs.ttsRate || 1;
-        document.getElementById('tts-rate-label').textContent = prefs.ttsRate || 1.0;
-        document.getElementById('pref-tts-pitch').value = prefs.ttsPitch || 1;
-        document.getElementById('tts-pitch-label').textContent = prefs.ttsPitch || 1.0;
-        document.getElementById('pref-tts-volume').value = prefs.ttsVolume || 1;
-        document.getElementById('tts-volume-label').textContent = Math.round((prefs.ttsVolume || 1) * 100);
+      const settings = TTSManager.get();
+      const utterance = new SpeechSynthesisUtterance(text);
 
-        document.getElementById('pref-selection-color').value = prefs.selectionColor || '#3b82f6';
-        document.getElementById('pref-button-style').value = prefs.buttonStyle || 'rounded';
-    }
-}
+      const voiceName = options.voice || settings.voice;
+      if (voiceName) {
+        const voice = speechSynthesis.getVoices().find(v => v.name === voiceName);
+        if (voice) utterance.voice = voice;
+      }
 
-// ============================================
-// RESPONSIBILITY: Flash a status message
-// ============================================
-export class StatusDisplay {
-    static set(msg) {
-        const el = document.getElementById('preferences-status');
-        if (!el) return;
-        el.textContent = msg;
-        setTimeout(() => { el.textContent = ''; }, 2500);
-    }
-}
+      utterance.rate = options.rate !== undefined ? options.rate : settings.rate;
+      utterance.pitch = options.pitch !== undefined ? options.pitch : settings.pitch;
+      utterance.volume = options.volume !== undefined ? options.volume : settings.volume;
 
-// ============================================
-// RESPONSIBILITY: Render preset & custom theme buttons
-// ============================================
-export class ThemeRenderer {
-    /** Build preset theme buttons in #preset-themes */
-    static setPresets() {
-        const container = document.getElementById('preset-themes');
-        if (!container) return;
-        container.innerHTML = '';
-
-        Object.keys(PreferencesConfig.PRESETS).forEach(name => {
-            const p = PreferencesConfig.PRESETS[name];
-            const btn = document.createElement('button');
-            btn.className = 'px-3 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm flex items-center gap-2';
-            btn.innerHTML = `<span class="w-3 h-3 rounded-full" style="background:${p.accent}"></span> ${name}`;
-            btn.addEventListener('click', async () => {
-                const currentLang = document.getElementById('pref-language')?.value || PreferencesStore.cachedPrefs?.language || '';
-                const currentTTS = {
-                    ttsVoice: PreferencesStore.cachedPrefs?.ttsVoice || '',
-                    ttsRate: PreferencesStore.cachedPrefs?.ttsRate || 1.0,
-                    ttsPitch: PreferencesStore.cachedPrefs?.ttsPitch || 1.0,
-                    ttsVolume: PreferencesStore.cachedPrefs?.ttsVolume || 1.0
-                };
-                await PreferencesStore.set({
-                    ...p,
-                    language: currentLang,
-                    ...currentTTS,
-                    customThemes: PreferencesStore.getThemes()
-                });
-                StatusDisplay.set('Applied: ' + name + ' - Reloading...');
-                setTimeout(() => TranslationHelper.cleanReload(), 200);
-            });
-            container.appendChild(btn);
-        });
+      speechSynthesis.speak(utterance);
+      return utterance;
     }
 
-    /** Build custom theme buttons in #custom-themes */
-    static setCustom() {
-        const container = document.getElementById('custom-themes');
-        if (!container) return;
-        container.innerHTML = '';
+    /** Speak whatever text is currently selected on the page */
+    static speakSelection() {
+      const sel = window.getSelection();
+      const text = sel ? sel.toString().trim() : '';
+      if (text) { TTSManager.speak(text); return true; }
+      return false;
+    }
 
-        const themes = PreferencesStore.getThemes();
-        const keys = Object.keys(themes);
-        if (!keys.length) {
-            container.innerHTML = '<p class="text-neutral-500 text-sm">No custom themes yet</p>';
-            return;
+    /** Cancel ongoing speech */
+    static stop() {
+      if ('speechSynthesis' in window) speechSynthesis.cancel();
+    }
+
+    /** True while the browser is actively speaking */
+    static isSpeaking() {
+      return 'speechSynthesis' in window && speechSynthesis.speaking;
+    }
+  }
+
+  // ============================================
+  // RESPONSIBILITY: localStorage read / write
+  // ============================================
+  class PreferencesStore {
+    static KEY = 'sitePreferences';
+
+    /** Get preferences from localStorage (returns object or null) */
+    static get() {
+      try {
+        const raw = window.localStorage.getItem(PreferencesStore.KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch (e) {
+        console.error('Error loading stored preferences', e);
+        return null;
+      }
+    }
+  }
+
+  // ============================================
+  // RESPONSIBILITY: Site-wide head-tracking runner
+  // ============================================
+  class GlobalHeadTracking {
+    static STORAGE_KEY = 'headTrackingPreferences';
+    static CALIBRATION_KEY = 'headTrackingCalibration';
+    static state = {
+      enabled: false,
+      sensitivity: 0.45,
+    };
+    static calibration = {
+      centerX: 0.5,
+      centerY: 0.5,
+      leftX: 0.3,
+      rightX: 0.7,
+      upY: 0.3,
+      downY: 0.7,
+      calibrated: false,
+    };
+
+    static stream = null;
+    static video = null;
+    static cursorEl = null;
+    static rafId = null;
+    static faceLandmarker = null;
+    static visionModule = null;
+    static lastPoint = null;
+
+    static init() {
+      // Dashboard owns the toggle UI and tracking lifecycle there.
+      if (document.getElementById('pref-head-tracking-enabled')) return;
+
+      GlobalHeadTracking._loadState();
+      GlobalHeadTracking._loadCalibration();
+      if (!GlobalHeadTracking.state.enabled) return;
+
+      GlobalHeadTracking._createCursor();
+      GlobalHeadTracking._startTracking();
+
+      window.addEventListener('beforeunload', () => {
+        GlobalHeadTracking._stopTracking();
+      });
+    }
+
+    static _loadState() {
+      try {
+        const raw = localStorage.getItem(GlobalHeadTracking.STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        GlobalHeadTracking.state.enabled = !!parsed.enabled;
+        const incomingSensitivity = Number(parsed.sensitivity);
+        if (Number.isFinite(incomingSensitivity)) {
+          GlobalHeadTracking.state.sensitivity = Math.min(0.9, Math.max(0.1, incomingSensitivity));
+        }
+      } catch (e) {
+        console.error('global head tracking load state error', e);
+      }
+    }
+
+    static _saveState() {
+      try {
+        localStorage.setItem(GlobalHeadTracking.STORAGE_KEY, JSON.stringify(GlobalHeadTracking.state));
+      } catch (e) {
+        console.error('global head tracking save state error', e);
+      }
+    }
+
+    static _loadCalibration() {
+      try {
+        const raw = localStorage.getItem(GlobalHeadTracking.CALIBRATION_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const asNum = (v, fallback) => {
+          const n = Number(v);
+          if (!Number.isFinite(n)) return fallback;
+          return Math.max(0, Math.min(1, n));
+        };
+        GlobalHeadTracking.calibration = {
+          centerX: asNum(parsed?.centerX, 0.5),
+          centerY: asNum(parsed?.centerY, 0.5),
+          leftX: asNum(parsed?.leftX, 0.3),
+          rightX: asNum(parsed?.rightX, 0.7),
+          upY: asNum(parsed?.upY, 0.3),
+          downY: asNum(parsed?.downY, 0.7),
+          calibrated: !!parsed?.calibrated,
+        };
+      } catch (e) {
+        console.error('global head tracking load calibration error', e);
+      }
+    }
+
+    static _mapRawToViewport(rawX, rawY) {
+      const x = Math.max(0, Math.min(1, rawX));
+      const y = Math.max(0, Math.min(1, rawY));
+      const c = GlobalHeadTracking.calibration;
+
+      if (!c?.calibrated) {
+        return { x, y };
+      }
+
+      const normalize = (value, min, max) => {
+        if (!Number.isFinite(min) || !Number.isFinite(max) || Math.abs(max - min) < 0.001) {
+          return 0.5;
+        }
+        return (value - min) / (max - min);
+      };
+
+      return {
+        x: Math.max(0, Math.min(1, normalize(x, c.leftX, c.rightX))),
+        y: Math.max(0, Math.min(1, normalize(y, c.upY, c.downY))),
+      };
+    }
+
+    static _createCursor() {
+      if (GlobalHeadTracking.cursorEl) return;
+
+      let el = document.getElementById('head-tracking-cursor');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'head-tracking-cursor';
+        el.style.position = 'fixed';
+        el.style.width = '18px';
+        el.style.height = '18px';
+        el.style.border = '2px solid #22d3ee';
+        el.style.borderRadius = '9999px';
+        el.style.background = 'rgba(34, 211, 238, 0.15)';
+        el.style.pointerEvents = 'none';
+        el.style.zIndex = '99999';
+        el.style.transform = 'translate(-9999px, -9999px)';
+        el.style.boxShadow = '0 0 12px rgba(34, 211, 238, 0.5)';
+        document.body.appendChild(el);
+      }
+
+      GlobalHeadTracking.cursorEl = el;
+    }
+
+    static _showCursor(x, y) {
+      if (!GlobalHeadTracking.cursorEl) return;
+      GlobalHeadTracking.cursorEl.style.transform = `translate(${Math.round(x - 9)}px, ${Math.round(y - 9)}px)`;
+    }
+
+    static _hideCursor() {
+      if (!GlobalHeadTracking.cursorEl) return;
+      GlobalHeadTracking.cursorEl.style.transform = 'translate(-9999px, -9999px)';
+    }
+
+    static async _startTracking() {
+      if (GlobalHeadTracking.stream) return;
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        GlobalHeadTracking.state.enabled = false;
+        GlobalHeadTracking._saveState();
+        return;
+      }
+
+      try {
+        if (!GlobalHeadTracking.visionModule) {
+          GlobalHeadTracking.visionModule = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm');
         }
 
-        keys.forEach(name => {
-            const theme = themes[name];
-            const wrap = document.createElement('div');
-            wrap.className = 'flex gap-2';
-
-            const btn = document.createElement('button');
-            btn.className = 'flex-1 px-3 py-2 rounded bg-neutral-700 hover:bg-neutral-600 text-white text-sm text-left flex items-center gap-2';
-            btn.innerHTML = `<span class="w-3 h-3 rounded-full" style="background:${theme.accent || '#3b82f6'}"></span> ${name}`;
-            btn.addEventListener('click', async () => {
-                const currentLang = document.getElementById('pref-language')?.value || PreferencesStore.cachedPrefs?.language || '';
-                const currentTTS = {
-                    ttsVoice: PreferencesStore.cachedPrefs?.ttsVoice || '',
-                    ttsRate: PreferencesStore.cachedPrefs?.ttsRate || 1.0,
-                    ttsPitch: PreferencesStore.cachedPrefs?.ttsPitch || 1.0,
-                    ttsVolume: PreferencesStore.cachedPrefs?.ttsVolume || 1.0
-                };
-                await PreferencesStore.set({
-                    ...theme,
-                    language: currentLang,
-                    ...currentTTS,
-                    customThemes: PreferencesStore.getThemes()
-                });
-                StatusDisplay.set('Applied: ' + name + ' - Reloading...');
-                setTimeout(() => TranslationHelper.cleanReload(), 200);
-            });
-
-            const del = document.createElement('button');
-            del.className = 'px-2 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-xs';
-            del.textContent = 'X';
-            del.title = 'Delete';
-            del.addEventListener('click', async () => {
-                const t = PreferencesStore.getThemes();
-                if (t[name]) delete t[name];
-                await PreferencesStore.setThemes(t);
-                ThemeRenderer.setCustom();
-                StatusDisplay.set('Deleted: ' + name);
-            });
-
-            wrap.appendChild(btn);
-            wrap.appendChild(del);
-            container.appendChild(wrap);
-        });
-    }
-
-    /** Save current form values as a named custom theme */
-    static async set(name) {
-        if (!name) { StatusDisplay.set('Enter a theme name'); return; }
-        const themes = PreferencesStore.getThemes();
-        if (Object.keys(themes).length >= PreferencesConfig.MAX_CUSTOM && !themes[name]) {
-            StatusDisplay.set('Max themes reached');
-            return;
-        }
-        themes[name] = FormManager.get();
-        await PreferencesStore.setThemes(themes);
-        ThemeRenderer.setCustom();
-        StatusDisplay.set('Saved: ' + name);
-        document.getElementById('new-theme-name').value = '';
-    }
-}
-
-// ============================================
-// RESPONSIBILITY: TTS voices & test button
-// ============================================
-export class TTSPanel {
-    /** Populate the voice <select> with available browser voices */
-    static set() {
-        const select = document.getElementById('pref-tts-voice');
-        if (!select) return;
-
-        const voices = speechSynthesis.getVoices();
-        select.innerHTML = '';
-
-        if (voices.length === 0) {
-            select.innerHTML = '<option value="">No voices available</option>';
-            return;
+        if (!GlobalHeadTracking.faceLandmarker) {
+          const fileset = await GlobalHeadTracking.visionModule.FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+          );
+          GlobalHeadTracking.faceLandmarker = await GlobalHeadTracking.visionModule.FaceLandmarker.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+            },
+            runningMode: 'VIDEO',
+            numFaces: 1,
+          });
         }
 
-        const defaultOpt = document.createElement('option');
-        defaultOpt.value = '';
-        defaultOpt.textContent = 'Default Voice';
-        select.appendChild(defaultOpt);
-
-        const voicesByLang = {};
-        voices.forEach(v => {
-            const lang = v.lang.split('-')[0];
-            if (!voicesByLang[lang]) voicesByLang[lang] = [];
-            voicesByLang[lang].push(v);
-        });
-
-        Object.keys(voicesByLang)
-            .sort((a, b) => { if (a === 'en') return -1; if (b === 'en') return 1; return a.localeCompare(b); })
-            .forEach(lang => {
-                const group = document.createElement('optgroup');
-                group.label = lang.toUpperCase();
-                voicesByLang[lang].forEach(voice => {
-                    const opt = document.createElement('option');
-                    opt.value = voice.name;
-                    opt.textContent = `${voice.name} (${voice.lang})`;
-                    group.appendChild(opt);
-                });
-                select.appendChild(group);
-            });
-
-        if (PreferencesStore.cachedPrefs?.ttsVoice) {
-            select.value = PreferencesStore.cachedPrefs.ttsVoice;
-        }
-    }
-
-    /** Speak the test-text input using current form TTS settings */
-    static test() {
-        if (!('speechSynthesis' in window)) {
-            StatusDisplay.set('Text-to-speech not supported');
-            return;
-        }
-        speechSynthesis.cancel();
-
-        const text = document.getElementById('tts-test-text').value || 'Hello, this is a test.';
-        const utterance = new SpeechSynthesisUtterance(text);
-
-        const voiceName = document.getElementById('pref-tts-voice').value;
-        if (voiceName) {
-            const voice = speechSynthesis.getVoices().find(v => v.name === voiceName);
-            if (voice) utterance.voice = voice;
-        }
-
-        utterance.rate = Number(document.getElementById('pref-tts-rate').value) || 1;
-        utterance.pitch = Number(document.getElementById('pref-tts-pitch').value) || 1;
-        utterance.volume = Number(document.getElementById('pref-tts-volume').value) || 1;
-
-        speechSynthesis.speak(utterance);
-    }
-}
-
-// ============================================
-// RESPONSIBILITY: Cookie cleanup & clean reload
-// ============================================
-export class TranslationHelper {
-    /** Wipe every googtrans cookie variant & remove GT DOM elements */
-    static clearCookies() {
-        const domain = window.location.hostname;
-        document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-        document.cookie = `googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=${domain}`;
-        document.cookie = `googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=.${domain}`;
-        document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; domain=.localhost';
-        document.cookie = 'googtrans=; expires=Thu, 01 Jan 1970 00:00:00 UTC;';
-        document.cookie = 'googtrans=/en/en; path=/;';
-        document.cookie = `googtrans=/en/en; path=/; domain=${domain}`;
-        document.cookie = `googtrans=/en/en; path=/; domain=.${domain}`;
-
-        const gtFrame = document.querySelector('.goog-te-banner-frame');
-        if (gtFrame) gtFrame.remove();
-        const gtMenu = document.querySelector('.goog-te-menu-frame');
-        if (gtMenu) gtMenu.remove();
-
-        document.body.style.top = '';
-        document.body.classList.remove('translated-ltr', 'translated-rtl');
-    }
-
-    /** Clear cookies then navigate to a clean URL */
-    static cleanReload() {
-        TranslationHelper.clearCookies();
-        window.location.href = window.location.href.split('#')[0];
-    }
-}
-
-// ============================================
-// RESPONSIBILITY: Save a specific section of prefs
-// ============================================
-export class SectionSaver {
-    /** Merge a section's form values into the current prefs and save */
-    static async set(section) {
-        const current = PreferencesStore.cachedPrefs
-            || await PreferencesStore.get()
-            || { ...PreferencesConfig.SITE_DEFAULT };
-        const form = FormManager.get();
-
-        if (section === 'text') {
-            current.font = form.font;
-            current.size = form.size;
-            current.text = form.text;
-        } else if (section === 'colors') {
-            current.bg = form.bg;
-            current.accent = form.accent;
-            current.selectionColor = form.selectionColor;
-            current.buttonStyle = form.buttonStyle;
-        } else if (section === 'tts') {
-            current.ttsVoice = form.ttsVoice;
-            current.ttsRate = form.ttsRate;
-            current.ttsPitch = form.ttsPitch;
-            current.ttsVolume = form.ttsVolume;
-        }
-
-        current.customThemes = PreferencesStore.getThemes();
-        await PreferencesStore.set(current);
-        StatusDisplay.set('Saved ' + section);
-    }
-}
-
-// ============================================
-// ORCHESTRATOR: Wires everything, attaches events
-// ============================================
-export class PreferencesController {
-    /** Main initialisation — called on DOMContentLoaded */
-    static async init() {
-        // Step 1: Load & apply saved preferences
-        let saved = null;
-        try {
-            saved = await PreferencesStore.get();
-        } catch (e) {
-            console.error('Error loading preferences during init', e);
-        }
-
-        // Step 2: Render theme buttons (must run even if prefs load fails)
-        ThemeRenderer.setPresets();
-        ThemeRenderer.setCustom();
-
-        // Step 3: Initialise TTS voice list
-        if ('speechSynthesis' in window) {
-            TTSPanel.set();
-            speechSynthesis.onvoiceschanged = TTSPanel.set;
-        }
-
-        // Step 4: Set form values from saved prefs (or defaults)
-        FormManager.set(saved || PreferencesConfig.SITE_DEFAULT);
-
-        // Step 5: Login status hint
-        if (PreferencesAPI.isLoggedIn) {
-            StatusDisplay.set(saved ? 'Preferences synced from your account' : 'No saved preferences found - using defaults');
-        }
-
-        // Step 6: Wire up all event listeners
-        PreferencesController._bindSliderLabels();
-        PreferencesController._bindButtons();
-        PreferencesController._bindLivePreview();
-    }
-
-    // --- Private helper: slider label updates ---
-    static _bindSliderLabels() {
-        document.getElementById('pref-font-size').addEventListener('input', e => {
-            document.getElementById('font-size-label').textContent = e.target.value;
-        });
-        document.getElementById('pref-tts-rate').addEventListener('input', e => {
-            document.getElementById('tts-rate-label').textContent = e.target.value;
-        });
-        document.getElementById('pref-tts-pitch').addEventListener('input', e => {
-            document.getElementById('tts-pitch-label').textContent = e.target.value;
-        });
-        document.getElementById('pref-tts-volume').addEventListener('input', e => {
-            document.getElementById('tts-volume-label').textContent = Math.round(e.target.value * 100);
-        });
-    }
-
-    // --- Private helper: button click handlers ---
-    static _bindButtons() {
-        // TTS test
-        document.getElementById('tts-test-btn').addEventListener('click', TTSPanel.test);
-
-        // Section save buttons
-        document.querySelectorAll('.save-section-btn').forEach(btn => {
-            btn.addEventListener('click', async function () {
-                await SectionSaver.set(this.dataset.section);
-                StatusDisplay.set('Saved! Reloading...');
-                setTimeout(() => TranslationHelper.cleanReload(), 200);
-            });
+        GlobalHeadTracking.stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            facingMode: 'user',
+          },
+          audio: false,
         });
 
-        // Save All
-        document.getElementById('save-preferences').addEventListener('click', async () => {
-            await PreferencesStore.set(FormManager.get());
-            StatusDisplay.set('Preferences saved! Reloading...');
-            setTimeout(() => TranslationHelper.cleanReload(), 200);
-        });
+        if (!GlobalHeadTracking.video) {
+          const v = document.createElement('video');
+          v.autoplay = true;
+          v.muted = true;
+          v.playsInline = true;
+          v.style.position = 'fixed';
+          v.style.width = '1px';
+          v.style.height = '1px';
+          v.style.opacity = '0';
+          v.style.pointerEvents = 'none';
+          v.style.left = '-9999px';
+          document.body.appendChild(v);
+          GlobalHeadTracking.video = v;
+        }
 
-        // Reset
-        document.getElementById('restore-styles').addEventListener('click', async () => {
-            if (PreferencesAPI.isLoggedIn) {
-                const deleted = await PreferencesAPI.delete();
-                if (!deleted) {
-                    StatusDisplay.set('Failed to delete from server, trying again...');
-                    await PreferencesAPI.delete();
-                }
+        GlobalHeadTracking.video.srcObject = GlobalHeadTracking.stream;
+        await GlobalHeadTracking.video.play();
+
+        GlobalHeadTracking.lastPoint = null;
+        GlobalHeadTracking._runLoop();
+      } catch (e) {
+        console.error('global head tracking start error', e);
+        GlobalHeadTracking.state.enabled = false;
+        GlobalHeadTracking._saveState();
+        GlobalHeadTracking._stopTracking();
+      }
+    }
+
+    static _runLoop() {
+      if (!GlobalHeadTracking.state.enabled || !GlobalHeadTracking.faceLandmarker || !GlobalHeadTracking.video) {
+        return;
+      }
+
+      const tick = () => {
+        if (!GlobalHeadTracking.state.enabled || !GlobalHeadTracking.faceLandmarker || !GlobalHeadTracking.video) {
+          return;
+        }
+
+        if (GlobalHeadTracking.video.readyState >= 2) {
+          const result = GlobalHeadTracking.faceLandmarker.detectForVideo(GlobalHeadTracking.video, performance.now());
+          const landmarks = result?.faceLandmarks?.[0];
+          const nose = landmarks?.[1];
+
+          if (nose) {
+            const rawX = 1 - nose.x;
+            const rawY = nose.y;
+            const mapped = GlobalHeadTracking._mapRawToViewport(rawX, rawY);
+            const targetX = mapped.x * window.innerWidth;
+            const targetY = mapped.y * window.innerHeight;
+
+            const alpha = Math.min(0.9, Math.max(0.1, GlobalHeadTracking.state.sensitivity));
+            if (!GlobalHeadTracking.lastPoint) {
+              GlobalHeadTracking.lastPoint = { x: targetX, y: targetY };
+            } else {
+              GlobalHeadTracking.lastPoint.x += (targetX - GlobalHeadTracking.lastPoint.x) * alpha;
+              GlobalHeadTracking.lastPoint.y += (targetY - GlobalHeadTracking.lastPoint.y) * alpha;
             }
 
-            localStorage.removeItem(PreferencesConfig.LOCAL_STORAGE_KEY);
-            localStorage.removeItem(PreferencesConfig.LOCAL_THEMES_KEY);
-            localStorage.setItem('preferencesReset', 'true');
-            PreferencesStore.cachedPrefs = null;
-            PreferencesAPI.backendPrefsExist = false;
+            const x = Math.max(0, Math.min(window.innerWidth - 1, GlobalHeadTracking.lastPoint.x));
+            const y = Math.max(0, Math.min(window.innerHeight - 1, GlobalHeadTracking.lastPoint.y));
 
-            if (window.SitePreferences?.resetPreferences) {
-                window.SitePreferences.resetPreferences();
-            }
+            GlobalHeadTracking._showCursor(x, y);
 
-            FormManager.set(PreferencesConfig.SITE_DEFAULT);
-            document.getElementById('pref-language').value = '';
-
-            StatusDisplay.set('Preferences reset! Reloading...');
-            setTimeout(() => TranslationHelper.cleanReload(), 300);
-        });
-
-        // Custom theme save / enter-key
-        document.getElementById('save-theme-btn').addEventListener('click', async () => {
-            await ThemeRenderer.set(document.getElementById('new-theme-name').value.trim());
-        });
-        document.getElementById('new-theme-name').addEventListener('keypress', async e => {
-            if (e.key === 'Enter') await ThemeRenderer.set(e.target.value.trim());
-        });
-    }
-
-    // --- Private helper: live preview for selection-color & button-style ---
-    static _bindLivePreview() {
-        ['pref-selection-color', 'pref-button-style'].forEach(id => {
-            const el = document.getElementById(id);
-            if (!el) return;
-            const handler = () => {
-                const stored = localStorage.getItem(PreferencesConfig.LOCAL_STORAGE_KEY);
-                if (!stored && !PreferencesStore.cachedPrefs) return;
-                const current = PreferencesStore.cachedPrefs || (stored ? JSON.parse(stored) : null);
-                if (!current) return;
-                const form = FormManager.get();
-                current.selectionColor = form.selectionColor;
-                current.buttonStyle = form.buttonStyle;
-                PreferencesStore.apply(current);
-            };
-            el.addEventListener('change', handler);
-            el.addEventListener('input', handler);
-        });
-    }
-}
-
-// ============================================
-// PUBLIC API: Initialize the preferences module
-// ============================================
-export function initializePreferences(javaURI, fetchOptions) {
-    // Initialize API config
-    PreferencesAPI.init(javaURI, fetchOptions);
-
-    // Boot orchestrator — module scripts are deferred so DOMContentLoaded
-    // may have already fired by the time this runs. Handle both cases.
-    if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        PreferencesController.init();
-    } else {
-        document.addEventListener('DOMContentLoaded', () => PreferencesController.init());
-    }
-
-    // Expose global functions for compatibility
-    window.loadPreferences = () => PreferencesStore.get();
-    window.checkLoginStatus = () => PreferencesAPI.checkLogin();
-
-    // Early localStorage flash (before DOMContentLoaded)
-    try {
-        const wasReset = localStorage.getItem('preferencesReset');
-        if (wasReset !== 'true') {
-            const raw = localStorage.getItem(PreferencesConfig.LOCAL_STORAGE_KEY);
-            if (raw) {
-                const prefs = JSON.parse(raw);
-                PreferencesStore.cachedPrefs = prefs;
-                PreferencesStore.apply(prefs);
-            }
+            const moveEvent = new MouseEvent('mousemove', {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              clientX: x,
+              clientY: y,
+            });
+            window.dispatchEvent(moveEvent);
+            const target = document.elementFromPoint(x, y);
+            if (target) target.dispatchEvent(moveEvent);
+          }
         }
-    } catch (e) {
-        console.error('Initial localStorage load error', e);
+
+        GlobalHeadTracking.rafId = requestAnimationFrame(tick);
+      };
+
+      GlobalHeadTracking.rafId = requestAnimationFrame(tick);
     }
-}
+
+    static _stopTracking() {
+      if (GlobalHeadTracking.rafId) {
+        cancelAnimationFrame(GlobalHeadTracking.rafId);
+        GlobalHeadTracking.rafId = null;
+      }
+
+      if (GlobalHeadTracking.stream) {
+        GlobalHeadTracking.stream.getTracks().forEach(track => track.stop());
+        GlobalHeadTracking.stream = null;
+      }
+
+      if (GlobalHeadTracking.video) {
+        GlobalHeadTracking.video.pause();
+        GlobalHeadTracking.video.srcObject = null;
+      }
+
+      GlobalHeadTracking.lastPoint = null;
+      GlobalHeadTracking._hideCursor();
+    }
+  }
+
+  // ============================================
+  // ORCHESTRATOR: Wires classes, exposes public API, runs init
+  // ============================================
+  function init() {
+    if (typeof window === 'undefined') return;
+
+    // If user explicitly reset, skip applying any prefs
+    const wasReset = window.localStorage.getItem('preferencesReset');
+    if (wasReset === 'true') return;
+
+    const prefs = PreferencesStore.get();
+    if (prefs) ThemeEngine.apply(prefs);
+
+    // Keep head-tracking preference active on all non-dashboard pages.
+    GlobalHeadTracking.init();
+  }
+
+  // Public API consumed by dashboard.html and other pages
+  window.SitePreferences = {
+    applyPreferences: prefs => ThemeEngine.apply(prefs),
+    resetPreferences: () => ThemeEngine.reset(),
+    applyLanguage: langCode => LanguageManager.apply(langCode),
+    PRESETS,
+    LANGUAGES,
+    // TTS
+    speak: (text, opts) => TTSManager.speak(text, opts),
+    speakSelection: () => TTSManager.speakSelection(),
+    stopSpeaking: () => TTSManager.stop(),
+    isSpeaking: () => TTSManager.isSpeaking(),
+    getTTSSettings: () => TTSManager.get(),
+  };
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    init();
+  } else {
+    document.addEventListener('DOMContentLoaded', init);
+  }
+})();
