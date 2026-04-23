@@ -1223,7 +1223,9 @@ export class HeadTrackingController {
 // RESPONSIBILITY: Voice command calibration persistence + noise profile
 // ============================================
 export class VoiceCalibrationManager {
-    static STORAGE_KEY = 'voiceCommandCalibration';
+    // Storage model:
+    // Backend-only persistence in generic_user_content via ContentType.VOICE_CALIBRATION.
+    // metadata JSON stores thresholds/noise/phrases and whether voice commands are enabled.
     static data = VoiceCalibrationManager._defaultCalibration();
     static refs = {
         status: null
@@ -1235,8 +1237,11 @@ export class VoiceCalibrationManager {
             ambientNoiseFloor: 0.02,
             phrases: {
                 up: ['scroll up', 'up'],
-                down: ['scroll down', 'down']
+                down: ['scroll down', 'down'],
+                click: ['click', 'tap', 'select'],
+                run: ['play', 'run', 'run code', 'run code cell', 'execute']
             },
+            voiceCommandsEnabled: false,
             calibrated: false
         };
     }
@@ -1268,15 +1273,18 @@ export class VoiceCalibrationManager {
             ambientNoiseFloor: clamp(data?.ambientNoiseFloor, 0, 1, d.ambientNoiseFloor),
             phrases: {
                 up: list(data?.phrases?.up, d.phrases.up),
-                down: list(data?.phrases?.down, d.phrases.down)
+                down: list(data?.phrases?.down, d.phrases.down),
+                click: list(data?.phrases?.click, d.phrases.click),
+                run: list(data?.phrases?.run, d.phrases.run)
             },
+            voiceCommandsEnabled: !!data?.voiceCommandsEnabled,
             calibrated: !!data?.calibrated
         };
     }
 
     static init(statusRef) {
         VoiceCalibrationManager.refs.status = statusRef || null;
-        VoiceCalibrationManager.loadLocal();
+        VoiceCalibrationManager.data = VoiceCalibrationManager._defaultCalibration();
     }
 
     static setStatus(message, isError = false) {
@@ -1285,33 +1293,8 @@ export class VoiceCalibrationManager {
         VoiceCalibrationManager.refs.status.style.color = isError ? '#f87171' : '';
     }
 
-    static loadLocal() {
-        try {
-            const raw = localStorage.getItem(VoiceCalibrationManager.STORAGE_KEY);
-            if (!raw) {
-                VoiceCalibrationManager.data = VoiceCalibrationManager._defaultCalibration();
-                return VoiceCalibrationManager.data;
-            }
-            VoiceCalibrationManager.data = VoiceCalibrationManager._sanitize(JSON.parse(raw));
-            return VoiceCalibrationManager.data;
-        } catch (e) {
-            console.error('voice calibration load local error', e);
-            VoiceCalibrationManager.data = VoiceCalibrationManager._defaultCalibration();
-            return VoiceCalibrationManager.data;
-        }
-    }
-
-    static saveLocal() {
-        try {
-            localStorage.setItem(VoiceCalibrationManager.STORAGE_KEY, JSON.stringify(VoiceCalibrationManager.data));
-        } catch (e) {
-            console.error('voice calibration save local error', e);
-        }
-    }
-
     static reset() {
         VoiceCalibrationManager.data = VoiceCalibrationManager._defaultCalibration();
-        VoiceCalibrationManager.saveLocal();
         VoiceCalibrationManager.setStatus('Voice calibration reset to defaults.');
     }
 
@@ -1393,7 +1376,6 @@ export class VoiceCalibrationManager {
             VoiceCalibrationManager.data.ambientNoiseFloor = Number(noiseFloor.toFixed(4));
             VoiceCalibrationManager.data.minConfidence = Number(adaptedConfidence.toFixed(2));
             VoiceCalibrationManager.data.calibrated = true;
-            VoiceCalibrationManager.saveLocal();
 
             VoiceCalibrationManager.setStatus(
                 `Noise floor captured: ${VoiceCalibrationManager.data.ambientNoiseFloor}. Confidence threshold set to ${VoiceCalibrationManager.data.minConfidence}.`
@@ -1416,18 +1398,22 @@ export class VoiceCalibrationManager {
         );
     }
 
-    static async saveToBackend() {
+    static async saveToBackend(options = {}) {
+        const { showStatus = true } = options;
         try {
             const userId = VoiceCalibrationManager._normalizeUserId(await VoiceCalibrationManager._getCurrentUserId());
             if (!userId) {
-                VoiceCalibrationManager.setStatus('You must be logged in to save voice calibration.', true);
+                if (showStatus) VoiceCalibrationManager.setStatus('You must be logged in to save voice calibration.', true);
                 return false;
             }
 
             const payload = {
                 userId,
                 body: `${userId}-voice-calibration`,
-                metadata: VoiceCalibrationManager._sanitize(VoiceCalibrationManager.data)
+                metadata: VoiceCalibrationManager._sanitize({
+                    ...VoiceCalibrationManager.data,
+                    voiceCommandsEnabled: !!VoiceCalibrationManager.data.voiceCommandsEnabled
+                })
             };
 
             const res = await fetch(`${PreferencesAPI.javaURI}/api/content/VOICE_CALIBRATION`, {
@@ -1437,30 +1423,31 @@ export class VoiceCalibrationManager {
             });
 
             if (!res.ok) {
-                VoiceCalibrationManager.setStatus(`Failed to save voice calibration (${res.status}).`, true);
+                if (showStatus) VoiceCalibrationManager.setStatus(`Failed to save voice calibration (${res.status}).`, true);
                 return false;
             }
 
-            VoiceCalibrationManager.setStatus('Voice calibration saved to backend.');
+            if (showStatus) VoiceCalibrationManager.setStatus('Voice calibration saved to backend.');
             return true;
         } catch (e) {
             console.error('save voice calibration backend error', e);
-            VoiceCalibrationManager.setStatus('Could not save voice calibration (network/server error).', true);
+            if (showStatus) VoiceCalibrationManager.setStatus('Could not save voice calibration (network/server error).', true);
             return false;
         }
     }
 
-    static async loadFromBackend() {
+    static async loadFromBackend(options = {}) {
+        const { showStatus = true } = options;
         try {
             const userId = VoiceCalibrationManager._normalizeUserId(await VoiceCalibrationManager._getCurrentUserId());
             if (!userId) {
-                VoiceCalibrationManager.setStatus('You must be logged in to load voice calibration.', true);
+                if (showStatus) VoiceCalibrationManager.setStatus('You must be logged in to load voice calibration.', true);
                 return false;
             }
 
             const res = await fetch(`${PreferencesAPI.javaURI}/api/content/VOICE_CALIBRATION`, PreferencesAPI.fetchOptions);
             if (!res.ok) {
-                VoiceCalibrationManager.setStatus(`Failed to load voice calibration list (${res.status}).`, true);
+                if (showStatus) VoiceCalibrationManager.setStatus(`Failed to load voice calibration list (${res.status}).`, true);
                 return false;
             }
 
@@ -1475,7 +1462,7 @@ export class VoiceCalibrationManager {
                 : [];
 
             if (!matches.length) {
-                VoiceCalibrationManager.setStatus(`No saved voice calibration found for ${userId}.`, true);
+                if (showStatus) VoiceCalibrationManager.setStatus(`No saved voice calibration found for ${userId}.`, true);
                 return false;
             }
 
@@ -1486,12 +1473,11 @@ export class VoiceCalibrationManager {
 
             VoiceCalibrationManager.data = VoiceCalibrationManager._sanitize(picked?.metadata || {});
             VoiceCalibrationManager.data.calibrated = true;
-            VoiceCalibrationManager.saveLocal();
-            VoiceCalibrationManager.setStatus(`Loaded voice calibration for ${userId}.`);
+            if (showStatus) VoiceCalibrationManager.setStatus(`Loaded voice calibration for ${userId}.`);
             return true;
         } catch (e) {
             console.error('load voice calibration backend error', e);
-            VoiceCalibrationManager.setStatus('Could not load voice calibration (network/server error).', true);
+            if (showStatus) VoiceCalibrationManager.setStatus('Could not load voice calibration (network/server error).', true);
             return false;
         }
     }
@@ -1501,7 +1487,6 @@ export class VoiceCalibrationManager {
 // RESPONSIBILITY: Voice-driven scroll commands
 // ============================================
 export class VoiceCommandController {
-    static STORAGE_KEY = 'voiceCommandPreferences';
     static COMMAND_COOLDOWN_MS = 350;
     static state = {
         enabled: false
@@ -1534,11 +1519,24 @@ export class VoiceCommandController {
 
         if (!VoiceCommandController.refs.toggle || !VoiceCommandController.refs.status) return;
 
-        VoiceCommandController._loadState();
         VoiceCalibrationManager.init(VoiceCommandController.refs.calibrationStatus);
+        VoiceCommandController._loadState();
 
         VoiceCommandController.refs.toggle.checked = !!VoiceCommandController.state.enabled;
         VoiceCommandController._syncToggleVisual();
+
+        // Best effort: hydrate voice settings from backend on startup.
+        VoiceCalibrationManager.loadFromBackend({ showStatus: false })
+            .then((loaded) => {
+                if (!loaded) return;
+                VoiceCommandController.state.enabled = !!VoiceCalibrationManager.data.voiceCommandsEnabled;
+                VoiceCommandController.refs.toggle.checked = VoiceCommandController.state.enabled;
+                VoiceCommandController._syncToggleVisual();
+                if (VoiceCommandController.state.enabled) {
+                    VoiceCommandController._startListening();
+                }
+            })
+            .catch(() => { /* no-op */ });
 
         VoiceCommandController.refs.toggle.addEventListener('change', async (e) => {
             await VoiceCommandController.setEnabled(!!e.target.checked);
@@ -1576,6 +1574,7 @@ export class VoiceCommandController {
 
     static async setEnabled(enabled) {
         VoiceCommandController.state.enabled = !!enabled;
+        VoiceCalibrationManager.data.voiceCommandsEnabled = VoiceCommandController.state.enabled;
         VoiceCommandController._saveState();
 
         if (VoiceCommandController.refs.toggle) {
@@ -1593,22 +1592,12 @@ export class VoiceCommandController {
     }
 
     static _loadState() {
-        try {
-            const raw = localStorage.getItem(VoiceCommandController.STORAGE_KEY);
-            if (!raw) return;
-            const parsed = JSON.parse(raw);
-            VoiceCommandController.state.enabled = !!parsed.enabled;
-        } catch (e) {
-            console.error('voice command load state error', e);
-        }
+        VoiceCommandController.state.enabled = !!VoiceCalibrationManager.data.voiceCommandsEnabled;
     }
 
     static _saveState() {
-        try {
-            localStorage.setItem(VoiceCommandController.STORAGE_KEY, JSON.stringify(VoiceCommandController.state));
-        } catch (e) {
-            console.error('voice command save state error', e);
-        }
+        if (!PreferencesAPI.isLoggedIn) return;
+        VoiceCalibrationManager.saveToBackend({ showStatus: false }).catch(() => { /* no-op */ });
     }
 
     static _setStatus(message, isError = false) {
@@ -1675,6 +1664,102 @@ export class VoiceCommandController {
         });
     }
 
+    static _isElementVisible(el) {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    }
+
+    static _triggerPointerClickAt(x, y) {
+        const cx = Math.max(0, Math.min(window.innerWidth - 1, x));
+        const cy = Math.max(0, Math.min(window.innerHeight - 1, y));
+        if (typeof HeadTrackingController._dispatchBlinkClick === 'function') {
+            HeadTrackingController._dispatchBlinkClick(cx, cy);
+            return true;
+        }
+
+        const target = document.elementFromPoint(cx, cy);
+        if (!target) return false;
+        target.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: cx,
+            clientY: cy,
+            button: 0
+        }));
+        return true;
+    }
+
+    static _handleClickCommand(transcript) {
+        const pointer = HeadTrackingController.lastPoint || {
+            x: Math.round(window.innerWidth / 2),
+            y: Math.round(window.innerHeight / 2)
+        };
+        const ok = VoiceCommandController._triggerPointerClickAt(pointer.x, pointer.y);
+        if (!ok) {
+            VoiceCommandController._setStatus(`Voice: "${transcript}" heard but no click target found.`, true);
+            return false;
+        }
+        VoiceCommandController._setStatus(`Voice: "${transcript}" -> click triggered.`);
+        return true;
+    }
+
+    static _tryClickRunLikeButton() {
+        const selector = [
+            'button[aria-label*="run" i]',
+            'button[title*="run" i]',
+            'button[aria-label*="play" i]',
+            'button[title*="play" i]',
+            '[role="button"][aria-label*="run" i]',
+            '[role="button"][aria-label*="play" i]',
+            '[data-testid*="run" i]',
+            '[data-action*="run" i]',
+            '.run-button',
+            '.play-button'
+        ].join(',');
+
+        const candidates = Array.from(document.querySelectorAll(selector))
+            .filter(el => VoiceCommandController._isElementVisible(el));
+        if (candidates.length) {
+            candidates[0].click();
+            return true;
+        }
+
+        const textButtons = Array.from(document.querySelectorAll('button, [role="button"], a'))
+            .filter(el => VoiceCommandController._isElementVisible(el))
+            .find(el => {
+                const text = (el.textContent || '').trim().toLowerCase();
+                return /^(run|run code|run cell|play|execute|start)$/.test(text);
+            });
+        if (textButtons) {
+            textButtons.click();
+            return true;
+        }
+
+        return false;
+    }
+
+    static _handleRunCommand(transcript) {
+        if (VoiceCommandController._tryClickRunLikeButton()) {
+            VoiceCommandController._setStatus(`Voice: "${transcript}" -> run/play clicked.`);
+            return true;
+        }
+
+        // Notebook/coderunner fallback: common execute shortcut.
+        const event = new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Enter',
+            code: 'Enter',
+            shiftKey: true
+        });
+        document.dispatchEvent(event);
+        VoiceCommandController._setStatus(`Voice: "${transcript}" -> sent Shift+Enter fallback.`);
+        return true;
+    }
+
     static _handleCommand(transcriptRaw, confidenceRaw) {
         const transcript = VoiceCommandController._normalizeTranscript(transcriptRaw);
         if (!transcript) return false;
@@ -1694,6 +1779,8 @@ export class VoiceCommandController {
         const amount = VoiceCommandController._scrollStep();
         const upPhrases = calibration?.phrases?.up || ['scroll up'];
         const downPhrases = calibration?.phrases?.down || ['scroll down'];
+        const clickPhrases = calibration?.phrases?.click || ['click'];
+        const runPhrases = calibration?.phrases?.run || ['play', 'run'];
 
         if (VoiceCommandController._matchesPhrase(transcript, upPhrases)) {
             window.scrollBy({ top: -amount, left: 0, behavior: 'smooth' });
@@ -1705,6 +1792,14 @@ export class VoiceCommandController {
             window.scrollBy({ top: amount, left: 0, behavior: 'smooth' });
             VoiceCommandController._setStatus(`Voice: "${transcript}" -> scrolled down ${amount}px.`);
             return true;
+        }
+
+        if (VoiceCommandController._matchesPhrase(transcript, clickPhrases)) {
+            return VoiceCommandController._handleClickCommand(transcript);
+        }
+
+        if (VoiceCommandController._matchesPhrase(transcript, runPhrases)) {
+            return VoiceCommandController._handleRunCommand(transcript);
         }
 
         return false;
@@ -1756,8 +1851,20 @@ export class VoiceCommandController {
                 return;
             }
 
-            if (code === 'no-speech' || code === 'audio-capture') {
-                VoiceCommandController._setStatus(`Voice input issue: ${code}. Retrying...`, true);
+            // no-speech/network can happen during silence or transient service hiccups.
+            // Keep UX calm and auto-recover instead of showing hard errors.
+            if (code === 'no-speech') {
+                VoiceCommandController._setStatus('Listening...');
+                return;
+            }
+
+            if (code === 'network') {
+                VoiceCommandController._setStatus('Listening service reconnecting...');
+                return;
+            }
+
+            if (code === 'audio-capture') {
+                VoiceCommandController._setStatus('Microphone not detected. Retrying...', true);
             } else {
                 VoiceCommandController._setStatus(`Voice recognition error: ${code}`, true);
             }
@@ -1969,8 +2076,6 @@ export class PreferencesController {
             localStorage.removeItem(PreferencesConfig.LOCAL_THEMES_KEY);
             localStorage.removeItem(HeadTrackingController.STORAGE_KEY);
             localStorage.removeItem(HeadCalibrationManager.STORAGE_KEY);
-            localStorage.removeItem(VoiceCommandController.STORAGE_KEY);
-            localStorage.removeItem(VoiceCalibrationManager.STORAGE_KEY);
             localStorage.setItem('preferencesReset', 'true');
             PreferencesStore.cachedPrefs = null;
             PreferencesAPI.backendPrefsExist = false;
