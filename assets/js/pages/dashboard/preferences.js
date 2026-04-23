@@ -839,6 +839,20 @@ export class HeadTrackingController {
             await HeadTrackingController.setEnabled(!!e.target.checked);
         });
 
+        const toggleFromVisual = async () => {
+            const next = !HeadTrackingController.refs.toggle.checked;
+            HeadTrackingController.refs.toggle.checked = next;
+            await HeadTrackingController.setEnabled(next);
+        };
+        HeadTrackingController.refs.toggleTrack?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            await toggleFromVisual();
+        });
+        HeadTrackingController.refs.toggleDot?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            await toggleFromVisual();
+        });
+
         if (HeadTrackingController.refs.sensitivity) {
             HeadTrackingController.refs.sensitivity.addEventListener('input', () => {
                 const raw = Number(HeadTrackingController.refs.sensitivity.value);
@@ -1206,6 +1220,596 @@ export class HeadTrackingController {
 }
 
 // ============================================
+// RESPONSIBILITY: Voice command calibration persistence + noise profile
+// ============================================
+export class VoiceCalibrationManager {
+    static STORAGE_KEY = 'voiceCommandCalibration';
+    static data = VoiceCalibrationManager._defaultCalibration();
+    static refs = {
+        status: null
+    };
+
+    static _defaultCalibration() {
+        return {
+            minConfidence: 0.45,
+            ambientNoiseFloor: 0.02,
+            phrases: {
+                up: ['scroll up', 'up'],
+                down: ['scroll down', 'down']
+            },
+            calibrated: false
+        };
+    }
+
+    static _normalizeUserId(value) {
+        if (value === null || value === undefined) return null;
+        const normalized = String(value).trim();
+        return normalized ? normalized : null;
+    }
+
+    static _sanitize(data) {
+        const d = VoiceCalibrationManager._defaultCalibration();
+        const clamp = (v, min, max, fallback) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return fallback;
+            return Math.min(max, Math.max(min, n));
+        };
+        const list = (arr, fallback) => {
+            if (!Array.isArray(arr) || !arr.length) return fallback;
+            const normalized = arr
+                .map(v => String(v || '').trim().toLowerCase())
+                .filter(Boolean)
+                .slice(0, 8);
+            return normalized.length ? normalized : fallback;
+        };
+
+        return {
+            minConfidence: clamp(data?.minConfidence, 0.2, 0.95, d.minConfidence),
+            ambientNoiseFloor: clamp(data?.ambientNoiseFloor, 0, 1, d.ambientNoiseFloor),
+            phrases: {
+                up: list(data?.phrases?.up, d.phrases.up),
+                down: list(data?.phrases?.down, d.phrases.down)
+            },
+            calibrated: !!data?.calibrated
+        };
+    }
+
+    static init(statusRef) {
+        VoiceCalibrationManager.refs.status = statusRef || null;
+        VoiceCalibrationManager.loadLocal();
+    }
+
+    static setStatus(message, isError = false) {
+        if (!VoiceCalibrationManager.refs.status) return;
+        VoiceCalibrationManager.refs.status.textContent = message;
+        VoiceCalibrationManager.refs.status.style.color = isError ? '#f87171' : '';
+    }
+
+    static loadLocal() {
+        try {
+            const raw = localStorage.getItem(VoiceCalibrationManager.STORAGE_KEY);
+            if (!raw) {
+                VoiceCalibrationManager.data = VoiceCalibrationManager._defaultCalibration();
+                return VoiceCalibrationManager.data;
+            }
+            VoiceCalibrationManager.data = VoiceCalibrationManager._sanitize(JSON.parse(raw));
+            return VoiceCalibrationManager.data;
+        } catch (e) {
+            console.error('voice calibration load local error', e);
+            VoiceCalibrationManager.data = VoiceCalibrationManager._defaultCalibration();
+            return VoiceCalibrationManager.data;
+        }
+    }
+
+    static saveLocal() {
+        try {
+            localStorage.setItem(VoiceCalibrationManager.STORAGE_KEY, JSON.stringify(VoiceCalibrationManager.data));
+        } catch (e) {
+            console.error('voice calibration save local error', e);
+        }
+    }
+
+    static reset() {
+        VoiceCalibrationManager.data = VoiceCalibrationManager._defaultCalibration();
+        VoiceCalibrationManager.saveLocal();
+        VoiceCalibrationManager.setStatus('Voice calibration reset to defaults.');
+    }
+
+    static async _captureNoiseSample(durationMs = 2500) {
+        if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error('Audio capture is not available in this browser.');
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            },
+            video: false
+        });
+
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextCtor) {
+            stream.getTracks().forEach(t => t.stop());
+            throw new Error('AudioContext is not available in this browser.');
+        }
+
+        let audioContext = null;
+        try {
+            audioContext = new AudioContextCtor();
+            const source = audioContext.createMediaStreamSource(stream);
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 2048;
+            source.connect(analyser);
+
+            const sampleBuffer = new Uint8Array(analyser.fftSize);
+            const samples = [];
+            const startedAt = performance.now();
+
+            await new Promise(resolve => {
+                const tick = () => {
+                    analyser.getByteTimeDomainData(sampleBuffer);
+                    let sum = 0;
+                    for (let i = 0; i < sampleBuffer.length; i += 1) {
+                        const centered = (sampleBuffer[i] - 128) / 128;
+                        sum += centered * centered;
+                    }
+                    const rms = Math.sqrt(sum / sampleBuffer.length);
+                    samples.push(rms);
+
+                    if (performance.now() - startedAt >= durationMs) {
+                        resolve();
+                        return;
+                    }
+
+                    requestAnimationFrame(tick);
+                };
+                tick();
+            });
+
+            const averageRms = samples.length
+                ? samples.reduce((acc, value) => acc + value, 0) / samples.length
+                : 0.02;
+
+            return Math.min(1, Math.max(0, averageRms));
+        } finally {
+            stream.getTracks().forEach(t => t.stop());
+            if (audioContext) {
+                try { await audioContext.close(); } catch (_) { }
+            }
+        }
+    }
+
+    static async captureEnvironmentNoise() {
+        VoiceCalibrationManager.setStatus('Listening to room noise... stay quiet for 2.5s');
+        try {
+            const noiseFloor = await VoiceCalibrationManager._captureNoiseSample(2500);
+
+            // In loud environments, recognition confidence usually drops.
+            // Lower threshold gradually so commands still register.
+            const adaptedConfidence = Math.min(0.85, Math.max(0.28, 0.62 - noiseFloor * 0.9));
+
+            VoiceCalibrationManager.data.ambientNoiseFloor = Number(noiseFloor.toFixed(4));
+            VoiceCalibrationManager.data.minConfidence = Number(adaptedConfidence.toFixed(2));
+            VoiceCalibrationManager.data.calibrated = true;
+            VoiceCalibrationManager.saveLocal();
+
+            VoiceCalibrationManager.setStatus(
+                `Noise floor captured: ${VoiceCalibrationManager.data.ambientNoiseFloor}. Confidence threshold set to ${VoiceCalibrationManager.data.minConfidence}.`
+            );
+            return true;
+        } catch (e) {
+            console.error('voice noise calibration error', e);
+            VoiceCalibrationManager.setStatus(`Noise calibration failed: ${e.message || e}`, true);
+            return false;
+        }
+    }
+
+    static async _getCurrentUserId() {
+        if (!PreferencesAPI.javaURI || !PreferencesAPI.fetchOptions) return null;
+        const res = await fetch(`${PreferencesAPI.javaURI}/api/person/get`, PreferencesAPI.fetchOptions);
+        if (!res.ok) return null;
+        const person = await res.json();
+        return VoiceCalibrationManager._normalizeUserId(
+            person?.id || person?.uid || person?.username || person?.name || null
+        );
+    }
+
+    static async saveToBackend() {
+        try {
+            const userId = VoiceCalibrationManager._normalizeUserId(await VoiceCalibrationManager._getCurrentUserId());
+            if (!userId) {
+                VoiceCalibrationManager.setStatus('You must be logged in to save voice calibration.', true);
+                return false;
+            }
+
+            const payload = {
+                userId,
+                body: `${userId}-voice-calibration`,
+                metadata: VoiceCalibrationManager._sanitize(VoiceCalibrationManager.data)
+            };
+
+            const res = await fetch(`${PreferencesAPI.javaURI}/api/content/VOICE_CALIBRATION`, {
+                ...PreferencesAPI.fetchOptions,
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+
+            if (!res.ok) {
+                VoiceCalibrationManager.setStatus(`Failed to save voice calibration (${res.status}).`, true);
+                return false;
+            }
+
+            VoiceCalibrationManager.setStatus('Voice calibration saved to backend.');
+            return true;
+        } catch (e) {
+            console.error('save voice calibration backend error', e);
+            VoiceCalibrationManager.setStatus('Could not save voice calibration (network/server error).', true);
+            return false;
+        }
+    }
+
+    static async loadFromBackend() {
+        try {
+            const userId = VoiceCalibrationManager._normalizeUserId(await VoiceCalibrationManager._getCurrentUserId());
+            if (!userId) {
+                VoiceCalibrationManager.setStatus('You must be logged in to load voice calibration.', true);
+                return false;
+            }
+
+            const res = await fetch(`${PreferencesAPI.javaURI}/api/content/VOICE_CALIBRATION`, PreferencesAPI.fetchOptions);
+            if (!res.ok) {
+                VoiceCalibrationManager.setStatus(`Failed to load voice calibration list (${res.status}).`, true);
+                return false;
+            }
+
+            const allRows = await res.json();
+            const expectedBody = `${userId}-voice-calibration`;
+            const matches = Array.isArray(allRows)
+                ? allRows.filter(row => {
+                    const rowUserId = VoiceCalibrationManager._normalizeUserId(row?.userId);
+                    const rowBody = VoiceCalibrationManager._normalizeUserId(row?.body);
+                    return rowUserId === userId || rowBody === expectedBody;
+                })
+                : [];
+
+            if (!matches.length) {
+                VoiceCalibrationManager.setStatus(`No saved voice calibration found for ${userId}.`, true);
+                return false;
+            }
+
+            const picked = matches.reduce((best, row) => {
+                if (!best) return row;
+                return Number(row?.id || 0) > Number(best?.id || 0) ? row : best;
+            }, null);
+
+            VoiceCalibrationManager.data = VoiceCalibrationManager._sanitize(picked?.metadata || {});
+            VoiceCalibrationManager.data.calibrated = true;
+            VoiceCalibrationManager.saveLocal();
+            VoiceCalibrationManager.setStatus(`Loaded voice calibration for ${userId}.`);
+            return true;
+        } catch (e) {
+            console.error('load voice calibration backend error', e);
+            VoiceCalibrationManager.setStatus('Could not load voice calibration (network/server error).', true);
+            return false;
+        }
+    }
+}
+
+// ============================================
+// RESPONSIBILITY: Voice-driven scroll commands
+// ============================================
+export class VoiceCommandController {
+    static STORAGE_KEY = 'voiceCommandPreferences';
+    static COMMAND_COOLDOWN_MS = 350;
+    static state = {
+        enabled: false
+    };
+    static refs = {
+        toggle: null,
+        toggleTrack: null,
+        toggleDot: null,
+        status: null,
+        calibrationStatus: null,
+        captureNoiseBtn: null,
+        saveCalibrationBtn: null,
+        loadCalibrationBtn: null,
+        resetCalibrationBtn: null
+    };
+    static recognition = null;
+    static listening = false;
+    static lastCommandAt = 0;
+
+    static init() {
+        VoiceCommandController.refs.toggle = document.getElementById('pref-voice-commands-enabled');
+        VoiceCommandController.refs.toggleTrack = document.getElementById('voice-commands-toggle-track');
+        VoiceCommandController.refs.toggleDot = document.getElementById('voice-commands-toggle-dot');
+        VoiceCommandController.refs.status = document.getElementById('voice-command-status');
+        VoiceCommandController.refs.calibrationStatus = document.getElementById('voice-calibration-status');
+        VoiceCommandController.refs.captureNoiseBtn = document.getElementById('voice-calibration-capture-noise');
+        VoiceCommandController.refs.saveCalibrationBtn = document.getElementById('voice-calibration-save');
+        VoiceCommandController.refs.loadCalibrationBtn = document.getElementById('voice-calibration-load');
+        VoiceCommandController.refs.resetCalibrationBtn = document.getElementById('voice-calibration-reset');
+
+        if (!VoiceCommandController.refs.toggle || !VoiceCommandController.refs.status) return;
+
+        VoiceCommandController._loadState();
+        VoiceCalibrationManager.init(VoiceCommandController.refs.calibrationStatus);
+
+        VoiceCommandController.refs.toggle.checked = !!VoiceCommandController.state.enabled;
+        VoiceCommandController._syncToggleVisual();
+
+        VoiceCommandController.refs.toggle.addEventListener('change', async (e) => {
+            await VoiceCommandController.setEnabled(!!e.target.checked);
+        });
+
+        const toggleFromVisual = async () => {
+            const next = !VoiceCommandController.refs.toggle.checked;
+            VoiceCommandController.refs.toggle.checked = next;
+            await VoiceCommandController.setEnabled(next);
+        };
+        VoiceCommandController.refs.toggleTrack?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            await toggleFromVisual();
+        });
+        VoiceCommandController.refs.toggleDot?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            await toggleFromVisual();
+        });
+
+        VoiceCommandController.refs.captureNoiseBtn?.addEventListener('click', () => VoiceCalibrationManager.captureEnvironmentNoise());
+        VoiceCommandController.refs.saveCalibrationBtn?.addEventListener('click', () => VoiceCalibrationManager.saveToBackend());
+        VoiceCommandController.refs.loadCalibrationBtn?.addEventListener('click', () => VoiceCalibrationManager.loadFromBackend());
+        VoiceCommandController.refs.resetCalibrationBtn?.addEventListener('click', () => VoiceCalibrationManager.reset());
+
+        if (VoiceCommandController.state.enabled) {
+            VoiceCommandController.setEnabled(true);
+        } else {
+            VoiceCommandController._setStatus('Voice commands are off.');
+        }
+
+        window.addEventListener('beforeunload', () => {
+            VoiceCommandController._stopListening();
+        });
+    }
+
+    static async setEnabled(enabled) {
+        VoiceCommandController.state.enabled = !!enabled;
+        VoiceCommandController._saveState();
+
+        if (VoiceCommandController.refs.toggle) {
+            VoiceCommandController.refs.toggle.checked = VoiceCommandController.state.enabled;
+        }
+        VoiceCommandController._syncToggleVisual();
+
+        if (!VoiceCommandController.state.enabled) {
+            VoiceCommandController._stopListening();
+            VoiceCommandController._setStatus('Voice commands disabled.');
+            return;
+        }
+
+        VoiceCommandController._startListening();
+    }
+
+    static _loadState() {
+        try {
+            const raw = localStorage.getItem(VoiceCommandController.STORAGE_KEY);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            VoiceCommandController.state.enabled = !!parsed.enabled;
+        } catch (e) {
+            console.error('voice command load state error', e);
+        }
+    }
+
+    static _saveState() {
+        try {
+            localStorage.setItem(VoiceCommandController.STORAGE_KEY, JSON.stringify(VoiceCommandController.state));
+        } catch (e) {
+            console.error('voice command save state error', e);
+        }
+    }
+
+    static _setStatus(message, isError = false) {
+        if (!VoiceCommandController.refs.status) return;
+        VoiceCommandController.refs.status.textContent = message;
+        VoiceCommandController.refs.status.style.color = isError ? '#f87171' : '';
+    }
+
+    static _syncToggleVisual() {
+        const { toggleTrack, toggleDot } = VoiceCommandController.refs;
+        if (!toggleTrack || !toggleDot) return;
+
+        const enabled = !!VoiceCommandController.state.enabled;
+        toggleTrack.classList.toggle('bg-cyan-500', enabled);
+        toggleTrack.classList.toggle('bg-neutral-600', !enabled);
+        toggleDot.style.transform = enabled ? 'translateX(20px)' : 'translateX(0px)';
+    }
+
+    static _getSensitivity() {
+        const slider = document.getElementById('pref-head-tracking-sensitivity');
+        const fallback = Number(slider?.value || 0.45);
+        const base = Number.isFinite(HeadTrackingController?.state?.sensitivity)
+            ? Number(HeadTrackingController.state.sensitivity)
+            : fallback;
+        return Math.min(0.9, Math.max(0.1, Number.isFinite(base) ? base : 0.45));
+    }
+
+    static _scrollStep() {
+        const s = VoiceCommandController._getSensitivity();
+        const normalized = (s - 0.1) / 0.8;
+        return Math.round(120 + normalized * 640);
+    }
+
+    static _extractBestAlternative(result) {
+        if (!result) return null;
+        let best = null;
+        for (let i = 0; i < result.length; i += 1) {
+            const alt = result[i];
+            if (!best) {
+                best = alt;
+                continue;
+            }
+            const bestConfidence = Number.isFinite(best.confidence) ? best.confidence : -1;
+            const altConfidence = Number.isFinite(alt.confidence) ? alt.confidence : -1;
+            if (altConfidence > bestConfidence) best = alt;
+        }
+        return best;
+    }
+
+    static _normalizeTranscript(text) {
+        return String(text || '')
+            .toLowerCase()
+            .replace(/[^a-z\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    static _matchesPhrase(transcript, phraseList) {
+        if (!transcript || !Array.isArray(phraseList)) return false;
+        return phraseList.some(phrase => {
+            const target = VoiceCommandController._normalizeTranscript(phrase);
+            if (!target) return false;
+            return transcript === target || transcript.includes(target);
+        });
+    }
+
+    static _handleCommand(transcriptRaw, confidenceRaw) {
+        const transcript = VoiceCommandController._normalizeTranscript(transcriptRaw);
+        if (!transcript) return false;
+
+        const calibration = VoiceCalibrationManager.data || VoiceCalibrationManager._defaultCalibration();
+        const minConfidence = Number(calibration.minConfidence || 0.45);
+        const confidence = Number(confidenceRaw);
+
+        if (Number.isFinite(confidence) && confidence < minConfidence) {
+            VoiceCommandController._setStatus(
+                `Ignored low-confidence phrase (${confidence.toFixed(2)} < ${minConfidence.toFixed(2)}).`,
+                true
+            );
+            return false;
+        }
+
+        const amount = VoiceCommandController._scrollStep();
+        const upPhrases = calibration?.phrases?.up || ['scroll up'];
+        const downPhrases = calibration?.phrases?.down || ['scroll down'];
+
+        if (VoiceCommandController._matchesPhrase(transcript, upPhrases)) {
+            window.scrollBy({ top: -amount, left: 0, behavior: 'smooth' });
+            VoiceCommandController._setStatus(`Voice: "${transcript}" -> scrolled up ${amount}px.`);
+            return true;
+        }
+
+        if (VoiceCommandController._matchesPhrase(transcript, downPhrases)) {
+            window.scrollBy({ top: amount, left: 0, behavior: 'smooth' });
+            VoiceCommandController._setStatus(`Voice: "${transcript}" -> scrolled down ${amount}px.`);
+            return true;
+        }
+
+        return false;
+    }
+
+    static _buildRecognition() {
+        const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognitionCtor) {
+            VoiceCommandController._setStatus('Speech recognition is not available in this browser.', true);
+            VoiceCommandController.state.enabled = false;
+            VoiceCommandController._saveState();
+            if (VoiceCommandController.refs.toggle) VoiceCommandController.refs.toggle.checked = false;
+            VoiceCommandController._syncToggleVisual();
+            return null;
+        }
+
+        const recognition = new SpeechRecognitionCtor();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 3;
+        recognition.lang = document.documentElement.lang || 'en-US';
+
+        recognition.onresult = (event) => {
+            for (let i = event.resultIndex; i < event.results.length; i += 1) {
+                const result = event.results[i];
+                if (!result?.isFinal) continue;
+
+                const best = VoiceCommandController._extractBestAlternative(result);
+                const transcript = best?.transcript || result?.[0]?.transcript || '';
+                const confidence = best?.confidence;
+
+                const now = performance.now();
+                if (now - VoiceCommandController.lastCommandAt < VoiceCommandController.COMMAND_COOLDOWN_MS) {
+                    continue;
+                }
+
+                const handled = VoiceCommandController._handleCommand(transcript, confidence);
+                if (handled) {
+                    VoiceCommandController.lastCommandAt = now;
+                }
+            }
+        };
+
+        recognition.onerror = async (event) => {
+            const code = event?.error || 'unknown';
+            if (code === 'not-allowed' || code === 'service-not-allowed') {
+                VoiceCommandController._setStatus('Microphone permission denied. Voice commands turned off.', true);
+                await VoiceCommandController.setEnabled(false);
+                return;
+            }
+
+            if (code === 'no-speech' || code === 'audio-capture') {
+                VoiceCommandController._setStatus(`Voice input issue: ${code}. Retrying...`, true);
+            } else {
+                VoiceCommandController._setStatus(`Voice recognition error: ${code}`, true);
+            }
+        };
+
+        recognition.onend = () => {
+            VoiceCommandController.listening = false;
+            if (!VoiceCommandController.state.enabled) return;
+            setTimeout(() => VoiceCommandController._startListening(), 300);
+        };
+
+        return recognition;
+    }
+
+    static _startListening() {
+        if (!VoiceCommandController.state.enabled) return;
+
+        if (!VoiceCommandController.recognition) {
+            VoiceCommandController.recognition = VoiceCommandController._buildRecognition();
+            if (!VoiceCommandController.recognition) return;
+        }
+
+        if (VoiceCommandController.listening) return;
+
+        try {
+            VoiceCommandController.recognition.start();
+            VoiceCommandController.listening = true;
+            const minConf = Number(VoiceCalibrationManager.data?.minConfidence || 0.45).toFixed(2);
+            VoiceCommandController._setStatus(`Listening for "scroll up/down" (threshold ${minConf}).`);
+        } catch (e) {
+            if ((e?.name || '').toLowerCase() !== 'invalidstateerror') {
+                console.error('voice recognition start error', e);
+                VoiceCommandController._setStatus('Could not start voice recognition.', true);
+            }
+        }
+    }
+
+    static _stopListening() {
+        VoiceCommandController.listening = false;
+        if (!VoiceCommandController.recognition) return;
+        try {
+            const rec = VoiceCommandController.recognition;
+            rec.onend = null;
+            rec.stop();
+        } catch (_) {
+        } finally {
+            VoiceCommandController.recognition = null;
+        }
+    }
+}
+
+// ============================================
 // RESPONSIBILITY: Cookie cleanup & clean reload
 // ============================================
 export class TranslationHelper {
@@ -1300,6 +1904,9 @@ export class PreferencesController {
         // Step 4.5: Initialise camera-driven head-tracking cursor controls
         HeadTrackingController.init();
 
+        // Step 4.6: Initialise voice scroll controls with backend calibration support
+        VoiceCommandController.init();
+
         // Step 5: Login status hint
         if (PreferencesAPI.isLoggedIn) {
             StatusDisplay.set(saved ? 'Preferences synced from your account' : 'No saved preferences found - using defaults');
@@ -1362,11 +1969,14 @@ export class PreferencesController {
             localStorage.removeItem(PreferencesConfig.LOCAL_THEMES_KEY);
             localStorage.removeItem(HeadTrackingController.STORAGE_KEY);
             localStorage.removeItem(HeadCalibrationManager.STORAGE_KEY);
+            localStorage.removeItem(VoiceCommandController.STORAGE_KEY);
+            localStorage.removeItem(VoiceCalibrationManager.STORAGE_KEY);
             localStorage.setItem('preferencesReset', 'true');
             PreferencesStore.cachedPrefs = null;
             PreferencesAPI.backendPrefsExist = false;
 
             await HeadTrackingController.setEnabled(false);
+            await VoiceCommandController.setEnabled(false);
 
             if (window.SitePreferences?.resetPreferences) {
                 window.SitePreferences.resetPreferences();

@@ -171,6 +171,31 @@ active_tab: dashboard
                         <p id="head-calibration-status" class="text-xs text-neutral-400 mt-2"></p>
                     </div>
 
+                    <div class="mt-5 pt-4 border-t border-neutral-700">
+                        <div class="flex justify-between items-center mb-3 gap-3">
+                            <h4 class="text-sm font-medium text-neutral-200">Voice Scroll Commands</h4>
+                            <label class="inline-flex items-center cursor-pointer">
+                                <input id="pref-voice-commands-enabled" type="checkbox" class="sr-only" />
+                                <div id="voice-commands-toggle-track" class="relative w-11 h-6 bg-neutral-600 rounded-full transition-colors duration-200">
+                                    <div id="voice-commands-toggle-dot" class="absolute left-0.5 top-0.5 bg-white rounded-full h-5 w-5 transition-transform duration-200"></div>
+                                </div>
+                                <span class="ms-3 text-sm text-neutral-300">Enable</span>
+                            </label>
+                        </div>
+
+                        <p class="text-xs text-neutral-500 mb-3">Say "scroll up" or "scroll down". Scroll distance follows the same sensitivity slider used by NodCursor.</p>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            <button type="button" id="voice-calibration-capture-noise" class="px-3 py-1 text-sm rounded bg-neutral-700 hover:bg-neutral-600 text-white">Capture Noise Floor</button>
+                            <button type="button" id="voice-calibration-reset" class="px-3 py-1 text-sm rounded bg-neutral-700 hover:bg-neutral-600 text-white">Reset Voice Calibration</button>
+                            <button type="button" id="voice-calibration-save" class="px-3 py-1 text-sm rounded bg-cyan-600 hover:bg-cyan-700 text-white">Save Voice Calibration</button>
+                            <button type="button" id="voice-calibration-load" class="px-3 py-1 text-sm rounded bg-blue-600 hover:bg-blue-700 text-white">Load Voice Calibration</button>
+                        </div>
+
+                        <p id="voice-calibration-status" class="text-xs text-neutral-400 mt-2"></p>
+                        <p id="voice-command-status" class="text-sm text-neutral-400 mt-2"></p>
+                    </div>
+
                     <p id="head-tracking-status" class="text-sm text-neutral-400 mt-3"></p>
                 </div>
 
