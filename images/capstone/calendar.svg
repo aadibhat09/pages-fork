@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Simple accessible calendar icon SVG for capstone pages -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="256" height="256" role="img" aria-labelledby="calTitle calDesc">
+  <title id="calTitle">Calendar</title>
+  <desc id="calDesc">Stylized calendar icon representing events and scheduling</desc>
+  <rect x="4" y="10" width="56" height="50" rx="4" fill="#ffffff" stroke="#0f172a" stroke-width="2"/>
+  <rect x="4" y="18" width="56" height="6" fill="#0f172a"/>
+  <circle cx="16" cy="32" r="3.2" fill="#0f172a"/>
+  <circle cx="32" cy="32" r="3.2" fill="#0f172a"/>
+  <circle cx="48" cy="32" r="3.2" fill="#0f172a"/>
+  <rect x="12" y="40" width="40" height="8" rx="2" fill="#e6f0ff"/>
+  <line x1="16" y1="6" x2="16" y2="14" stroke="#0f172a" stroke-width="2"/>
+  <line x1="48" y1="6" x2="48" y2="14" stroke="#0f172a" stroke-width="2"/>
+</svg>
